@@ -107,9 +107,9 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Inventory
 - **Risk:** The robot can count known slots but cannot read detailed item identities without an Inventory Controller Upgrade.
-- **Current evidence:** The robot has an Inventory Upgrade but no documented Inventory Controller Upgrade.
-- **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Evaluate an Inventory Controller before autonomous loading is implemented.
-- **Resolution criteria:** The prototype detects incorrect material before reporting success; autonomous loading has a documented hardware decision.
+- **Current evidence:** The robot has an Inventory Upgrade but no Inventory Controller Upgrade. The farm requirements call for switching among multiple equipped tools.
+- **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Before terrain preparation, install and validate an Inventory Controller Upgrade or adopt a workflow that does not require automatic tool swapping.
+- **Resolution criteria:** The prototype detects incorrect material before reporting success, and the robot can identify required materials and select every required tool safely.
 
 ### OCIA-012: Placement can fail without a supporting surface
 
@@ -179,7 +179,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Blueprint execution
 - **Risk:** Generic block placement may produce the wrong orientation or fail to configure machines, addons, power, or item routing.
-- **Current evidence:** The intended Sugar Cane farm contains modded machines whose interaction behavior has not been validated.
+- **Current evidence:** The intended Potato farm contains modded machines and multipart logistics whose robot placement, orientation, and configuration behavior has not been validated.
 - **Required mitigation:** Treat machine operations as typed blueprint actions and test each block against the installed mod versions before adding it to an automated blueprint.
 - **Resolution criteria:** Every machine used by a production blueprint has documented placement, orientation, configuration, and verification behavior.
 
@@ -191,6 +191,42 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Current evidence:** Default OpenComputers configuration limits packets to eight data parts and 8192 bytes.
 - **Required mitigation:** Send bounded single-operation messages, serialize compact argument/result payloads, and validate payload size before transmission.
 - **Resolution criteria:** Maximum supported requests remain within configured limits and oversized requests fail locally with a clear error.
+
+### OCIA-021: Plant Interactor compatibility with Potatoes is unverified
+
+- **Status:** Open
+- **Area:** Farm operation
+- **Risk:** The deployed farm may be constructed correctly but never harvest vanilla Potatoes.
+- **Current evidence:** Industrial Foregoing 1.12.13 implements the Plant Interactor as a right-click harvester. The installed Quark configuration enables right-click harvesting and explicitly lists mature `minecraft:potatoes:7`, so compatibility is expected but not yet proven with the Interactor's fake player.
+- **Required mitigation:** Test the installed Plant Interactor and Quark interaction against mature Potatoes. If it does not harvest them, use a compatible harvesting machine or select another supported crop.
+- **Resolution criteria:** An installed-version test harvests a mature Potato, stores the drops, and leaves the field in the intended replanted state.
+
+### OCIA-022: Required robot tool upgrades are not finalized
+
+- **Status:** In progress
+- **Area:** Robot hardware
+- **Risk:** Terrain clearing and tilling require several tools, but the assembled robot cannot currently switch its equipped tool or craft replacements autonomously.
+- **Current evidence:** The robot already contains an Inventory Upgrade. The user is adding an Inventory Controller Upgrade for automatic equipment swapping. Refined Storage, not the robot, will craft and stock replacement tools.
+- **Required mitigation:** Install the Inventory Controller Upgrade, verify robot component capacity, and test `equip` plus external inventory access after reassembly.
+- **Resolution criteria:** The assembled robot can identify, extract, equip, use, replace, and return every tool required by the terrain-preparation plan.
+
+### OCIA-023: Refined Storage Interface slot mapping needs an in-game probe
+
+- **Status:** Open
+- **Area:** Material staging
+- **Risk:** Incorrect slot assumptions could prevent tool withdrawal or cause the robot to return the Dead Bush or reusable items to a non-insertable slot.
+- **Current evidence:** Refined Storage 1.6.16 source exposes an 18-slot combined item handler: nine import slots followed by nine export slots. OpenComputers uses one-based external slot numbers, implying import slots 1–9 and stocked export slots 10–18.
+- **Required mitigation:** Probe the installed Interface with `getInventorySize`, `getStackInSlot`, `suckFromSlot`, and `dropIntoSlot` from each relevant side before encoding the mapping.
+- **Resolution criteria:** An in-game test extracts a known tool from its stocked export slot and deposits a test item into an import slot that Refined Storage accepts.
+
+### OCIA-024: Refined Storage can complete before the robot mission ends
+
+- **Status:** Accepted
+- **Area:** Completion semantics
+- **Risk:** The Dead Bush can complete the external processing request even if the robot later becomes stranded while returning to charge.
+- **Current evidence:** The required contract defines token deposit as Refined Storage completion and arrival at the charging station as robot mission completion.
+- **Required mitigation:** Track `construction_verified`, `rs_acknowledged`, and `returned_to_charge` separately. Continue monitoring and report a recovery alert after acknowledgment until the robot reaches its origin.
+- **Resolution criteria:** A failed return trip leaves Refined Storage complete but records the robot mission as recovery-required rather than complete.
 
 ## Resolved Issues
 

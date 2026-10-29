@@ -33,9 +33,12 @@ All runtime software must remain compatible with the installed Minecraft environ
 - Biomes O' Plenty world generation
 - Survival game mode
 - FTB App launcher
-- OpenComputers classic implementation
+- OpenComputers classic `1.8.8+8da357f`
 - OpenOS 1.8.8
 - Lua 5.3
+- Industrial Foregoing `1.12.13-237`
+- Extra Utilities 2 `1.9.9`
+- EnderStorage `2.4.6.137`
 - Refined Storage 1.6.16
 - Refined Storage Addons 0.4.5
 - Approximately 768 KiB of RAM per OpenComputers machine
@@ -129,6 +132,20 @@ A blueprint may define:
 
 The controller translates relative blueprint coordinates into a sequence of bounded robot operations. Navigation strategy, retries, and robot assignment are planner concerns and should not be embedded in the blueprint.
 
+## Coordinate Convention
+
+The controller uses configurable dead reckoning from a known charging-station origin. Unless a blueprint explicitly declares otherwise:
+
+- The origin is `(0, 0, 0)`.
+- The robot begins facing North.
+- North is negative Z.
+- East is positive X.
+- Up is positive Y.
+
+For example, moving forward from the origin produces `(0, 0, -1)`. Turning right faces East; moving forward then produces `(1, 0, -1)`. Moving up produces `(1, 1, -1)`.
+
+Absolute navigation may be added later. Until then, the configured origin, initial heading, and every acknowledged movement form the authoritative pose chain.
+
 ## Command and State Model
 
 Wireless commands use a versioned request/reply protocol on port 4242. Construction traffic should be sent directly to a configured robot modem address rather than broadcast.
@@ -165,6 +182,8 @@ Position and orientation are relative to an explicitly established deployment or
 
 A completion token is an external assertion of success. It must never be returned for a failed, partially complete, unverified, or ambiguous deployment.
 
+Refined Storage completion and robot mission completion are distinct states. Depositing the Dead Bush after verified construction completes the Refined Storage processing request. The robot mission remains active until the robot returns safely to its configured charging-station origin. A failure during the return trip does not invalidate completed construction, but it must remain visible as an incomplete robot mission requiring recovery.
+
 ## Initial Validation Scenario
 
 The reference vertical slice is a 3x3 dirt platform constructed from a known starting position and orientation.
@@ -200,11 +219,15 @@ The platform should be built above known supporting terrain so ordinary OpenComp
 - Build robustly without overengineering away the enjoyment of the project.
 - Design explicitly for missed wireless messages, obstruction, incomplete inventory, and exhausted energy.
 
-## Long-Term Direction
+## Farm Deployment Direction
 
 The same architecture should support several farms and machine installations by changing blueprint data and supplied materials rather than rewriting the movement engine.
 
-The primary production use case is an automated Sugar Cane farm supplying renewable Sugar for Hootch production. The production design uses apples supplied by a Forestry Multifarm. The intended process is:
+The first complete farm target is a conventional 9x9 Potato field with central irrigation. It exists to establish reusable algorithms for terrain leveling, tilling, planting, machine placement, material handling, and end-to-end verification.
+
+Crop-specific designs are expected. Sugar Cane, Cactus, trees, and other plants with nonstandard soil, spacing, water, or harvesting rules must use specialized blueprints rather than being forced into the conventional farmland layout.
+
+A longer-term production use case is renewable Sugar for Hootch production. The production design uses apples supplied by a Forestry Multifarm. The intended process is:
 
 ```text
 Apples + Sugar + Water
@@ -214,7 +237,7 @@ Apples + Sugar + Water
     -> Factory power
 ```
 
-The farm may require terrain preparation, Dirt, Sugar Cane, water placement, an Industrial Foregoing Plant Gatherer, a Range Addon, power distribution, a Wireless RF Transmitter or another energy connection, item collection, logistics, and remote item return through EnderStorage. Every modded block must have its placement, orientation, interaction, and verification behavior tested before generic automation is assumed.
+Farm blueprints may require terrain preparation, soil or substrate placement, crop planting, water placement, an appropriate Industrial Foregoing machine, a Range Addon, power distribution, a Wireless RF Transmitter or another energy connection, item collection, logistics, and remote item return through EnderStorage. Every modded block must have its placement, orientation, interaction, and verification behavior tested before generic automation is assumed.
 
 Potential extensions include bill-of-materials generation, dry-run planning, pre-deployment site validation, collision and obstruction detection, safe retry, idempotent operations, progress tracking, interrupted-operation recovery, persistent deployment history, material staging through a Transposer, autonomous charging, multiple robots, multiple deployment sites, machine orientation and configuration, EnderStorage logistics, and direct Refined Storage integration where the installed APIs support it.
 
