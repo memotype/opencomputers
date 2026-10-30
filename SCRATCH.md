@@ -67,7 +67,15 @@ The construction robot is built through the Electronics Assembler, boots success
 - Inventory Upgrade.
 - Internal disk drive.
 
-The robot can be disassembled with the OpenComputers Disassembler, but disassembly and reassembly are expensive and inconvenient. Confirm that an additional hardware upgrade is actually required before recommending a rebuild. The robot operates from an internal energy buffer; long-range deployment will require a battery-management and charging strategy.
+The robot can be disassembled with the OpenComputers Disassembler, but disassembly and reassembly are expensive and inconvenient. Confirm that an additional hardware upgrade is actually required and fits the Tier 2 complexity/component limits before recommending a rebuild.
+
+The charging station now has verified hardware:
+
+- OpenComputers Charger.
+- Existing Ender IO energy-conduit supply.
+- Lever supplying the Charger's activation signal.
+
+In-game testing showed that adjacency and conduit power were insufficient while the Charger lacked redstone. After a Lever was installed and activated, the Charger restored enough Robot energy for it to boot normally. This verifies stationary charging and the normal-mode redstone requirement, not autonomous docking, alignment, charge detection, target-level waiting, or deployment resume.
 
 ### Working remote control
 
@@ -86,6 +94,20 @@ This path has been tested successfully in Minecraft. For example, `drive> f 4` r
 The controller originally asserted an unconditional `modem.open(4242)`, which failed when the port was already open. `drive.lua` now checks `modem.isOpen(4242)` first and closes the port on normal shutdown. Port ownership is still tracked as OCIA-007, and the equivalent restart guard is still absent from `robotd.lua` under OCIA-006.
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
+
+### Survey capability research
+
+The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` and its bundled English manual establish these API boundaries. They have not yet been exercised by this robot in-game:
+
+- `robot.detect()`, `detectUp()`, and `detectDown()` examine only the adjacent space and return occupancy plus a broad category such as `entity`, `solid`, `replaceable`, `liquid`, or `air`.
+- `robot.compare()`, `compareUp()`, and `compareDown()` compare an adjacent block with the selected inventory item. They do not return arbitrary block identity.
+- No general `robot.inspect*` method appears in the installed 1.8.8 Robot library.
+- The Inventory Controller Upgrade provides detailed item-stack and external-inventory inspection, targeted inventory transfer, and `equip()` for tool swapping. It is not a terrain scanner.
+- A Geolyzer can be installed in a robot. Its documented component methods include `scan(...)`, which reports approximate noisy density or hardness for a bounded volume, and `analyze(side[, options])`, which reports information about one directly adjacent block.
+- Installed callback documentation records `scan(x, z[, y, w, d, h][, ignoreReplaceable|options])` and `analyze(side[, options])`. Exact return tables, range under this configuration, energy use, noise behavior, and modded-block data still require in-game probes.
+- `allowItemStackInspection=true` is enabled; installed bytecode gates Geolyzer `analyze()` behind that setting. Its actual returned block fields still need to be recorded in-game.
+
+A Geolyzer may materially improve surface mapping and clearance discovery, but density scans do not establish registry identity. Blocks that are neither adjacent nor safely reachable may remain estimates or unknowns. Do not rebuild the robot for a Geolyzer until its value, required slot, and compatibility with the current Tier 2 assembly are established.
 
 ### Confirmed native Refined Storage integration
 
@@ -163,8 +185,8 @@ Visible help included these signatures:
 ```lua
 getItems():table
 getItem(stack:table[, compareMeta:boolean[, compareNBT:boolean]]):table
-scheduleTask(stack:table, count:number, canSchedule:boolean):table
-extractItem(stack:table, count:number, direction:number):table
+scheduleTask(stack:table[, count:number[, canSchedule:boolean]]):table
+extractItem(stack:table[, count:number[, direction:number]]):table
 ```
 
 Only `isConnected()` and `getItems()` have been exercised successfully. Individual item queries, pattern discovery, craft scheduling and monitoring, physical extraction, insertion, direction semantics, optional arguments, and return structures remain unverified.
@@ -205,7 +227,10 @@ These choices are proposed for the first implementation and should be revised he
 - Build the first platform one block above known supporting terrain.
 - Carry nine consumable dirt blocks plus one reserved dirt comparison block for exact verification.
 - Keep the controller authoritative for deployment state; use native RS integration only as an inventory and autocrafting service.
-- Survey before calculating the terrain bill of materials, then allow staged extraction, multiple supply trips, recovered-material credit, and explicit reconciliation.
+- Treat blueprint data as desired state, a read-only survey as observed state, and the controller-generated diff as the inspectable plan.
+- Survey and produce a deterministic terrain plan before calculating the bill of materials; do not let the initial survey modify blocks.
+- Revalidate plan preconditions before apply, then resurvey after apply to prove convergence or report remaining differences.
+- Allow staged extraction, multiple supply trips, recovered-material credit, and explicit reconciliation after the plan establishes requirements.
 - Continue validating the standalone 3x3 control loop before coupling physical construction to automated provisioning.
 
 ## Potato Farm MVP Requirements
@@ -292,14 +317,15 @@ DDDDDDDDD
 
 Verify as much as the installed APIs reasonably permit, including terrain shape, Dirt/farmland state, water placement, machine positions and orientation, logistics placement, addon installation, power availability, planted crop state, item extraction, returned bucket, and robot recovery or return state. Unsupported verification must be reported explicitly rather than silently treated as success.
 
-Completion has four explicit milestones:
+Completion records separate outcomes:
 
 1. `construction_verified`: the farm satisfies all supported construction and functional checks.
-2. `resources_reconciled`: allocated, loaded, recovered, consumed, returned, and missing resources are reconciled or any discrepancy is explicitly recorded.
-3. `returned_to_charge`: the robot returns to the configured charging-station origin.
-4. `mission_complete`: the preceding required milestones are satisfied.
+2. `resource_reconciliation_complete`: the accounting pass has finished.
+3. `resource_balance`: `balanced`, `discrepant`, or `accepted_discrepancy`. Only `balanced` is unconditional resource success; acceptance records the operator or policy and evidence separately.
+4. `returned_to_charge`: the robot is at its configured charging pose and a bounded observation proves that charging is functioning.
+5. `mission_outcome`: successful, successful with an accepted exception, or recovery required.
 
-If return fails after construction verification, construction remains complete but the robot mission enters recovery-required state. RS crafting tasks and the optional Dead Bush trigger do not define these milestones.
+Construction may verify while resources remain discrepant or the return fails. Neither case is unconditional mission success. RS crafting tasks and the optional Dead Bush trigger do not define these milestones.
 
 ## Roadmap
 
@@ -402,8 +428,8 @@ Goal: turn discovered component methods into a tested, version-specific inventor
 
 - Test A — call `getItem()` for `{name="minecraft:dirt", damage=0}` and record the returned structure plus metadata/NBT matching behavior.
 - Test B — use `hasPattern()`, `getPattern()`, or `getPatterns()` for a simple known autocraftable item and record its output representation.
-- Test C — schedule one inexpensive craft and determine accepted arguments, task handles, monitoring through `getTasks()` or `getCraftingTasks()`, and behavior with missing ingredients or no pattern.
-- Test D — place an ordinary chest adjacent to the Interface and extract one vanilla Dirt. Determine installed-version direction constants, stack format, physical adjacency, return quantity, chest receipt, RS inventory delta, and partial-extraction behavior.
+- Test C — schedule one inexpensive craft and determine accepted arguments, omitted-argument defaults, task handles, monitoring through `getTasks()` or `getCraftingTasks()`, and behavior with missing ingredients or no pattern.
+- Test D — place an ordinary chest adjacent to the Interface and extract one vanilla Dirt. Determine omitted-argument defaults, installed-version direction constants, stack format, physical adjacency, return quantity, chest receipt, RS inventory delta, and partial-extraction behavior.
 - Test E — return one item to RS through the appropriate Interface inventory or exposed method and verify both the physical transfer and RS inventory increase.
 - Test F — exercise or safely simulate network disconnection, absent materials, insufficient storage, a craft that cannot proceed, a full destination, extraction beyond one stack, and controller/game restart during an inventory operation.
 - Keep the first craft and transfer deliberately cheap and small.
@@ -412,40 +438,84 @@ Goal: turn discovered component methods into a tested, version-specific inventor
 
 Related risks: OCIA-025, OCIA-026, OCIA-027, OCIA-028, OCIA-030.
 
-### Phase 7: Implement survey-driven resource provisioning
+### Phase 7: Survey terrain and produce a read-only plan
 
-Goal: compute and fulfill a dynamic manifest without coupling deployment completion to an RS crafting job.
+Goal: observe a representative uneven 9x10 site and compute the desired-versus-observed terrain diff without modifying any block.
+
+- Probe `robot.detect*`, `robot.compare*`, Inventory Controller inspection, and Geolyzer `scan`/`analyze` behavior against the installed version.
+- Decide whether the Geolyzer is necessary and fits the existing Tier 2 robot before any rebuild.
+- Define a coordinate-indexed survey record with explicit observation kinds such as identified, compared, detected category, density estimate, and unknown.
+- Record surface elevation, accessible material identity, trees and foliage, holes and unsupported terrain, elevated terrain, replacement surfaces, crop/machinery clearance, and five-block-limit failures.
+- Preserve raw observations separately from controller-derived conclusions.
+- Produce a deterministic plan with destroy, add, and change operations; estimated recovered and additional materials; unsafe conditions; and unsupported observations.
+- Reject `READY TO APPLY` when an unknown or unsafe condition affects execution safety or the material estimate beyond the accepted policy.
+- Confirm that repeating the planner with the same blueprint and survey produces the same ordered plan.
+- The acceptance run must perform no `swing`, `place`, `use`, or other world-changing operation.
+
+Acceptance report must contain:
+
+1. A terrain map or equivalent coordinate-indexed observations.
+2. Excavation requirements.
+3. Fill requirements.
+4. Surface replacement requirements.
+5. Obstruction and clearance requirements.
+6. Estimated recoverable materials.
+7. Estimated additional materials.
+8. Unsupported or uncertain observations with evidence level.
+9. Conditions preventing safe execution.
+
+Related risks: OCIA-004, OCIA-015, OCIA-016, OCIA-020, OCIA-032, OCIA-033, OCIA-034.
+
+### Phase 8: Implement survey-driven resource provisioning
+
+Goal: compute and fulfill a dynamic manifest from an accepted plan without coupling deployment completion to an RS crafting job.
 
 - Define the initial controller-side submission contract and persist a deployment ID before surveying or provisioning.
-- Define a bounded site-survey report and generate excavation, clearance, fill, replacement-surface, tool, and installation requirements from it.
-- Credit recoverable excavation material only after it is observed and allocated.
-- Track stored, craftable, allocated, loaded, recovered, consumed, returned, and missing quantities separately.
+- Derive the gross and net bill of materials from the accepted terrain plan, not directly from an assumed flat blueprint site.
+- Credit recoverable excavation material only after it is observed, recovered, and allocated.
+- Track stored, craftable, allocated, loaded, recovered, consumed, returned, missing, and unexplained quantities separately.
 - Reserve resources for one active deployment and detect changes between inventory query, crafting, and extraction.
 - Stage verified quantities in a dedicated accessible inventory and support partial fulfillment and multiple resupply trips.
 - Choose and verify the robot loading path, including the Inventory Controller Upgrade and tool switching.
 - Return the empty bucket, recovered blocks, unused supplies, and worn tools through the tested insertion path.
 - Journal inventory mutations so restart ambiguity leads to reconciliation rather than blind replay.
+- Record accounting completion separately from `balanced`, `discrepant`, or explicitly accepted discrepancy outcomes.
 - Keep the Dead Bush workflow outside the required provisioning and completion state machines.
 
 Related risks: OCIA-011, OCIA-022, OCIA-023, OCIA-026, OCIA-027, OCIA-028, OCIA-029, OCIA-030, OCIA-031.
 
-### Phase 8: Develop the Potato farm MVP
+### Phase 9: Apply and verify autonomous terrain preparation
 
-Goal: extend the proven deployment system to the production use case.
+Goal: complete the first major site-preparation milestone by surveying an uneven 9x10 footprint, applying its accepted terrain plan, and proving the result matches the target surface.
 
-- Finalize the 9x10 site-survey contract and generate the variable bill of materials from observed terrain.
-- Test clearing, five-block fill, surface replacement, tilling, and Potato planting.
+- Revalidate surveyed preconditions before the first destructive operation; replan or stop if the site drifted.
+- Execute clearing, tree and foliage removal, excavation, five-block-limited filling, surface replacement, and required crop/machinery clearance as bounded operations.
+- Verify every operation result and update actual recovered, consumed, and remaining material counts.
+- Support controlled resupply when the verified execution result changes the estimated material requirement.
+- Stop safely on unbreakable blocks, unsupported terrain below the fill limit, ambiguous pose, unexpected material, insufficient tools, or energy reserve breach.
+- Resurvey the prepared footprint without modifying it and compare the observed result with the terrain target.
+- Report remaining destroy/add/change differences; declare terrain convergence only when all supported requirements pass.
+- Return to the charging pose and prove energy is increasing before `returned_to_charge` succeeds.
+
+Related risks: OCIA-003, OCIA-004, OCIA-005, OCIA-014, OCIA-015, OCIA-016, OCIA-022, OCIA-029, OCIA-032, OCIA-034, OCIA-035.
+
+### Phase 10: Develop the Potato farm MVP
+
+Goal: use the converged terrain-preparation system to construct and verify useful infrastructure.
+
+- Use the verified 9x10 terrain-preparation result; a manually prepared field is not a substitute for the end-to-end MVP.
+- Test tilling, water placement, and Potato planting after terrain convergence.
 - Validate provisioning, receipt, and successful planting of all 80 Potatoes.
 - Test placement and orientation for water, the selected harvester, Tier 4 Range Addon, Wireless RF Transmitter, multipart Transfer Node/Pipe, and Ender Chest.
 - Test source-water placement from the supplied bucket and return of the empty bucket.
 - Define machine configuration and verification as typed actions.
 - Determine power and EnderStorage connection requirements.
-- Evaluate charging, chunk loading, and return-to-base needs for the selected site.
+- Evaluate chunk-loading and return-to-charge needs for the selected site.
 - Implement the farm only from individually verified block and machine behaviors.
 
-Related risks: OCIA-011, OCIA-014, OCIA-015, OCIA-019, OCIA-021, OCIA-022, OCIA-029.
+Related risks: OCIA-011, OCIA-014, OCIA-015, OCIA-019, OCIA-021, OCIA-022, OCIA-029, OCIA-035.
 
-### Phase 9: Add specialized crop blueprints
+### Phase 11: Add specialized crop blueprints
 
 Goal: support crops whose placement or harvesting rules differ from ordinary farmland.
 
@@ -469,6 +539,16 @@ The next software implementation session should continue with Phase 1 while pres
 
 The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
+Before implementing the terrain survey, run small supervised API probes in a disposable test area:
+
+1. Record `robot.detect*` results for air, Dirt, Stone, foliage, liquid, and an entity where safe.
+2. Record `robot.compare*` behavior with matching and nonmatching block samples.
+3. Install or test a Geolyzer only after confirming assembly capacity; record `scan` and `analyze` return tables, range, noise, energy cost, and modded-block behavior.
+4. Determine which 9x10 observations are positive identifications, comparisons, categories, density estimates, or unavoidable unknowns.
+5. Run the first complete survey-and-plan acceptance test with world-changing operations disabled.
+
+For charging, measure robot energy at the expected charging pose with the Lever on and off. Establish the observation interval and minimum positive energy delta that will prove charging without confusing ordinary energy use or a full buffer with failure.
+
 ## Handoff Notes
 
 - Existing source and unrelated user changes must be preserved carefully.
@@ -476,6 +556,10 @@ The next Refined Storage validation session should execute Phase 6 Tests A throu
 - The same guard is absent from the robot daemon.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
 - Detailed item-stack inspection does require an Inventory Controller Upgrade.
+- The Inventory Controller Upgrade does not identify terrain blocks.
+- Installed 1.8.8 code exposes no general `robot.inspect*`; detailed adjacent block analysis belongs to the optional Geolyzer.
+- Geolyzer density scans are noisy estimates; `analyze` is limited to a directly adjacent block.
 - Ordinary robot placement requires a supporting surface unless Angel placement is available.
+- The verified Charger requires redstone activation in normal mode; autonomous docking and positive charging verification remain untested.
 - OpenComputers defaults permit at most eight packet data parts and 8192 bytes per packet; keep messages compact.
 - Do not implement mandatory Dead Bush return logic; it is an optional legacy trigger only.

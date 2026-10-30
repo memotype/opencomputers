@@ -10,14 +10,15 @@ Conceptually, this is a Terraform-like Infrastructure as Code platform operating
 
 ```text
 deployment request
-    -> controller orchestration
-    -> robot site survey
-    -> controller terrain plan and bill of materials
+    -> blueprint desired state
+    + robot terrain survey observed state
+    -> controller plan and diff
     -> Refined Storage inventory and autocrafting
     -> staged robot supplies
-    -> terrain preparation and construction
-    -> controller verification and resource reconciliation
-    -> robot return to charging station
+    -> apply terrain and construction plan
+    -> resurvey and verify convergence
+    -> resource reconciliation
+    -> verified robot charging return
 ```
 
 The ultimate goal is to request a structure or machine installation, have the required materials provisioned and collected automatically, and have one or more robots navigate to the site, construct and verify the deployment, and report success without treating an incomplete build as successful.
@@ -87,7 +88,9 @@ The stationary controller is authoritative for deployment intent and orchestrati
 - Detecting and validating staged deployment materials.
 - Receiving deployment intent independently of RS crafting tasks.
 - Directing the robot's bounded site survey and interpreting its observations.
-- Computing terrain changes and a survey-derived bill of materials.
+- Computing a deterministic, inspectable difference between observed terrain and blueprint desired state.
+- Refusing to apply plans containing unresolved unknowns or unsafe site conditions.
+- Computing terrain changes and a survey-derived bill of materials from the accepted plan.
 - Querying stored and craftable resources, calculating deficits, and scheduling missing supplies.
 - Monitoring crafting, extraction, delivery, returns, and partial fulfillment.
 - Selecting a blueprint and deployment origin.
@@ -114,6 +117,7 @@ The robot is a lightweight, defensive execution agent. It is responsible for:
 - Inspecting the immediate environment where supported.
 - Retrieving materials from staging inventories when required by the workflow.
 - Surveying the bounded deployment footprint and reporting observations.
+- Distinguishing positively observed facts from estimates, categorical detections, and unknown conditions.
 - Loading supplies, unloading recovered materials, and requesting resupply through the controller.
 - Tracking relative position and orientation.
 - Checking local preconditions before changing the world.
@@ -141,6 +145,39 @@ A blueprint may define:
 - Verification requirements.
 
 The controller translates relative blueprint coordinates into a sequence of bounded robot operations. Navigation strategy, retries, and robot assignment are planner concerns and should not be embedded in the blueprint.
+
+## Survey, Plan, Apply, and Verify
+
+The deployment model follows a deliberately small Terraform-style reconciliation loop:
+
+```text
+blueprint desired state + terrain survey observed state
+    -> deterministic plan and diff
+    -> resource plan
+    -> bounded apply operations
+    -> verification survey
+    -> converged state or remaining differences
+```
+
+The initial terrain survey is read-only. It records coordinate-indexed observations for the deployment footprint, including surface elevation, encountered materials where they can be identified, obstructions and clearance, holes and support, required excavation, required fill, surface replacement, estimated recoverable material, and unsafe or unknown conditions. Survey records must identify the evidence behind each fact. A categorical obstruction result, a noisy density estimate, and a positively identified adjacent block are not interchangeable observations.
+
+A plan is deterministic for a given blueprint and survey. It is inspectable before execution and explicitly states blocks to destroy, add, or change; resource requirements; recoverable materials; unknowns; and conditions that prevent safe apply. Planning itself does not change the world.
+
+An operator-facing summary may use Terraform-like language such as `Plan: 143 to destroy, 217 to add, 12 to change`, followed by recovered and additional resource estimates and either `READY TO APPLY` or a blocking reason. Such figures are plan output, never assumed constants.
+
+A saved plan is not permission to assume the world remained unchanged. Before and during apply, the controller validates relevant preconditions against the current world. If they differ from the survey, it either creates a new plan from new observations or stops without blindly applying stale operations.
+
+Verification repeats the necessary observations after apply and compares the resulting world with the blueprint. Success means the supported desired state converged; unsupported observations and remaining differences are reported rather than silently accepted. This analogy guides the architecture without requiring a general-purpose Terraform clone.
+
+### Survey capability boundaries
+
+In classic OpenComputers 1.8.8, the base Robot detection methods inspect only the immediately adjacent front, upper, or lower space and return broad categories such as solid, replaceable, liquid, air, or entity. Item comparison can test an adjacent block against a carried sample, but the installed Robot API does not provide a general arbitrary-block `inspect` call.
+
+The Inventory Controller Upgrade provides detailed item-stack and inventory inspection plus equipped-tool swapping. It does not by itself identify world terrain.
+
+A Geolyzer can be installed as a robot upgrade. Its `scan` operation reports approximate, noisy block density or hardness over a bounded volume; it is useful for discovering structure but does not prove block registry identity. Its `analyze` operation can return detailed information about a directly adjacent block when inspection is enabled. Exact identification of inaccessible underground blocks must therefore remain unknown unless the robot can safely reach and analyze them or another installed-version capability is proven.
+
+The Geolyzer's practical value, energy cost, installed return structures, and fit within the existing Tier 2 robot must be tested before requiring another disassembly and rebuild.
 
 ## Coordinate Convention
 
@@ -193,11 +230,23 @@ Position and orientation are relative to an explicitly established deployment or
 Construction and mission completion are distinct states. At minimum, durable deployment state distinguishes:
 
 - Construction verified.
-- Resource reconciliation completed or explicitly reported incomplete.
-- Robot returned to the configured charging-station origin.
-- Mission complete.
+- Resource reconciliation process completed.
+- Resource balance is `balanced`, `discrepant`, or `accepted_discrepancy`.
+- Robot reached the configured charging pose.
+- Charging verified from observed energy behavior or another validated signal.
+- Mission outcome recorded as successful, successful with an accepted exception, or recovery required.
 
-A failure during the return trip does not invalidate verified construction, but it remains an incomplete mission requiring recovery. RS crafting-task completion is only a provisioning event and must never advance one of these construction milestones by itself.
+A balanced ledger may satisfy the resource-success condition. Merely detecting or reporting missing, extra, or unexplained material completes the accounting attempt but does not make it reconciled successfully. An operator or explicit policy may accept a discrepancy, but the exception, actor or policy, and evidence remain durable; the mission must not be reported as unconditionally successful.
+
+A failure during the return or charging check does not invalidate verified construction, but it remains an incomplete mission requiring recovery. RS crafting-task completion is only a provisioning event and must never advance one of these construction milestones by itself.
+
+## Charging and Recovery
+
+The verified charging station consists of an OpenComputers Charger supplied by the factory's Ender IO energy-conduit network. The Charger requires an activating redstone signal in its normal mode; an installed Lever has successfully activated it and restored a depleted Robot sufficiently for normal boot.
+
+This proves stationary charging hardware, not autonomous docking. Reaching the configured charging coordinates is necessary but insufficient. `returned_to_charge` requires both the expected robot pose and evidence that charging is functioning, such as a measured energy increase over a bounded observation interval. A full buffer needs a separately validated full-charge condition. A powerless Charger, disabled redstone input, incorrect alignment, or otherwise unexplained lack of energy gain must not be reported as a successful charging return.
+
+Autonomous navigation to the station, alignment, charge detection, target-level waiting, and safe resume after recharging remain implementation responsibilities.
 
 ## Survey-Driven Provisioning and Resource Accounting
 
@@ -217,6 +266,8 @@ The controller accounts separately for:
 - Materials lost or otherwise unaccounted for.
 
 Recovered material can offset gross fill requirements, but only after it has been observed and accounted for. Durable inventory transactions and reconciliation must prevent silent duplication, loss, or double allocation after a restart.
+
+Resource reconciliation records both whether the accounting pass finished and whether the ledger balanced. Construction may verify successfully while reconciliation remains discrepant, but mission success must expose that discrepancy until it is resolved or explicitly accepted under a recorded policy.
 
 ## Initial Validation Scenario
 
@@ -273,7 +324,7 @@ Apples + Sugar + Water
 
 Farm blueprints may require terrain preparation, soil or substrate placement, crop planting, water placement, an appropriate Industrial Foregoing machine, a Range Addon, power distribution, a Wireless RF Transmitter or another energy connection, item collection, logistics, and remote item return through EnderStorage. Every modded block must have its placement, orientation, interaction, and verification behavior tested before generic automation is assumed.
 
-Potential extensions include dry-run planning, collision and obstruction detection, safe retry, idempotent operations, progress tracking, persistent deployment history, autonomous charging, multiple robots, multiple deployment sites, machine orientation and configuration, and EnderStorage logistics.
+Potential extensions include richer dry-run reporting, collision and obstruction detection, safe retry, idempotent operations, progress tracking, persistent deployment history, autonomous docking and recharge recovery, multiple robots, multiple deployment sites, machine orientation and configuration, and EnderStorage logistics.
 
 These extensions must build on verified command execution and truthful completion reporting rather than bypassing them.
 

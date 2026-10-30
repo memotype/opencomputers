@@ -135,9 +135,9 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Power management
 - **Risk:** A deployment may begin with insufficient energy and stop away from its recovery location.
-- **Current evidence:** Energy is reported but not used as an execution precondition.
-- **Required mitigation:** Establish conservative preflight and reserve thresholds before long deployments; later add charging and return-to-base behavior.
-- **Resolution criteria:** Deployment is refused below the configured reserve and tested plans account for return or recovery energy.
+- **Current evidence:** Energy is reported but not used as an execution precondition. A conduit-powered OpenComputers Charger has restored the Robot successfully after a Lever supplied the required redstone activation signal.
+- **Required mitigation:** Establish conservative preflight and reserve thresholds, budget survey/apply/return energy separately, and enter recovery before the reserve is exhausted. Charging-station verification is tracked by OCIA-035.
+- **Resolution criteria:** Deployment is refused below the configured reserve, tested plans account for return energy, and low-energy execution stops while the robot can still reach or be recovered at the station.
 
 ### OCIA-015: Chunk unloading can interrupt unattended deployment
 
@@ -154,8 +154,8 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Area:** Concurrency and safety
 - **Risk:** Players, mobs, machines, fluids, or other robots may change the site between planning and execution.
 - **Current evidence:** No site reservation or repeated precondition validation exists.
-- **Required mitigation:** Validate immediately before every physical action and stop on unexpected state. Consider site ownership only if concurrent deployments are introduced.
-- **Resolution criteria:** A changed target produces a safe obstruction result rather than replacement or continued blind execution.
+- **Required mitigation:** Bind each plan to its survey, revalidate affected preconditions before apply, validate immediately before every physical action, and either deterministically replan or stop on drift. Consider site ownership only if concurrent deployments are introduced.
+- **Resolution criteria:** A controlled terrain change after survey invalidates the stale plan; the controller produces a new plan or stops, and no obsolete destructive action executes.
 
 ### OCIA-019: Modded machines may require specialized placement or configuration
 
@@ -207,7 +207,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Autocrafting integration
 - **Risk:** The controller may misinterpret patterns, task handles, failure states, or completion and wait forever or provision the wrong quantity.
-- **Current evidence:** `getPatterns`, `getPattern`, `hasPattern`, `scheduleTask`, `getTasks`, `getCraftingTasks`, and `cancelTask` are exposed, but none has been exercised. Only a displayed `scheduleTask` signature is recorded.
+- **Current evidence:** `getPatterns`, `getPattern`, `hasPattern`, `scheduleTask`, `getTasks`, `getCraftingTasks`, and `cancelTask` are exposed, but none has been exercised. OpenOS displayed `scheduleTask(stack[, count[, canSchedule]])`; omitted-argument defaults and return behavior are unverified.
 - **Required mitigation:** Discover a known cheap pattern, schedule a minimal craft, record returned structures and task transitions, and test missing-material and missing-pattern behavior.
 - **Resolution criteria:** An installed-version test suite can distinguish accepted, active, successful, failed, unavailable, and cancelled crafting requests without treating craft completion as construction completion.
 
@@ -216,7 +216,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Material staging
 - **Risk:** A query may report stock while extraction moves fewer or no items because of direction, adjacency, stack limits, or destination capacity.
-- **Current evidence:** `extractItem(stack, count, direction)` is exposed but has not been called. Direction constants, returned quantity, large-count behavior, and destination-full behavior are unknown.
+- **Current evidence:** `extractItem(stack[, count[, direction]])` is exposed but has not been called. Omitted-argument defaults, direction constants, returned quantity, large-count behavior, and destination-full behavior are unknown.
 - **Required mitigation:** Extract one vanilla Dirt into an adjacent ordinary chest, verify both inventories, then test partial, over-one-stack, and full-destination cases using installed direction constants.
 - **Resolution criteria:** The controller records actual delivered quantity and distinguishes complete, partial, and failed extraction without assuming success from prior inventory data.
 
@@ -244,8 +244,8 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Area:** Resource planning
 - **Risk:** Concurrent stock changes, partial supply trips, or recovered excavation material can produce over-allocation, shortages, or an incorrect net bill of materials.
 - **Current evidence:** The native inventory list is readable, but no reservation ledger or survey-derived manifest implementation exists.
-- **Required mitigation:** Maintain separate stored, craftable, allocated, loaded, recovered, consumed, returned, and unaccounted quantities; initially limit provisioning to one active deployment.
-- **Resolution criteria:** A deployment with at least one partial resupply and recovered Dirt reconciles every unit or reports a specific discrepancy.
+- **Required mitigation:** Maintain separate stored, craftable, allocated, loaded, recovered, consumed, returned, and unaccounted quantities; record accounting completion separately from balance state; and initially limit provisioning to one active deployment. Any operator or policy acceptance must be a durable exception record.
+- **Resolution criteria:** A deployment with at least one partial resupply and recovered Dirt reaches `balanced`, while an injected missing-item case reaches `discrepant` and cannot report unconditional mission success. An accepted discrepancy remains visible with its actor or policy and evidence.
 
 ### OCIA-030: Refined Storage availability and task failure can stall a deployment
 
@@ -264,6 +264,42 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Current evidence:** The controller is now authoritative, but the initial command interface and durable deployment-ID creation flow have not been selected. The Dead Bush may be an optional future trigger only.
 - **Required mitigation:** Define an explicit controller-side submission command or file format, generate a durable deployment ID before physical work, and initially allow only one active deployment.
 - **Resolution criteria:** Duplicate or stale submissions cannot start a second mission, and a deployment can be inspected and resumed independently of any RS crafting task.
+
+### OCIA-032: Terrain observations may be too weak for a safe plan
+
+- **Status:** Open
+- **Area:** Terrain surveying
+- **Risk:** Treating obstruction detection or a hardness estimate as exact block identity can produce the wrong excavation method, material estimate, or safety decision.
+- **Current evidence:** Installed 1.8.8 `robot.detect*` methods return only adjacent occupancy categories. `robot.compare*` requires a carried sample. The base Robot library exposes no general `inspect*` method.
+- **Required mitigation:** Define evidence levels for identified, compared, categorical, estimated, and unknown observations; probe representative Dirt, Stone, foliage, liquid, air, and modded blocks in-game; and reject plans whose unresolved evidence is safety-critical.
+- **Resolution criteria:** A read-only 9x10 survey reports the evidence type at every required observation, distinguishes Dirt and Stone only through proven methods, and prevents `READY TO APPLY` when a required classification remains unsafe or unknown.
+
+### OCIA-033: Geolyzer value and robot compatibility are unverified
+
+- **Status:** Open
+- **Area:** Robot hardware
+- **Risk:** Rebuilding the robot for a Geolyzer may be costly or exceed the current Tier 2 assembly limits without providing reliable material classification.
+- **Current evidence:** The installed manual permits Geolyzers in robots. Installed callbacks expose noisy density/hardness `scan` data and detailed adjacent `analyze` data, but neither has been exercised on this robot and current spare capacity has not been confirmed.
+- **Required mitigation:** Record the current assembled component/complexity budget, test the Geolyzer externally or in a controlled assembly where practical, and compare its survey value and energy cost with a no-Geolyzer route before recommending a rebuild.
+- **Resolution criteria:** An in-game test records actual `scan` and `analyze` structures, range, noise, energy cost, and modded-block behavior, and a documented capacity check establishes whether the upgrade is necessary and installable.
+
+### OCIA-034: Inaccessible terrain cannot be fully classified before excavation
+
+- **Status:** Open
+- **Area:** Survey completeness
+- **Risk:** Hidden voids or unknown subsurface materials can invalidate fill-depth, recoverable-material, tool, and safety estimates after destructive work begins.
+- **Current evidence:** Detailed Geolyzer analysis is adjacent-only, while volume scans report noisy density or hardness rather than registry identity. No proven method identifies every inaccessible block in the five-block support depth.
+- **Required mitigation:** Mark inaccessible cells as estimated or unknown, use conservative support/material assumptions, verify newly exposed conditions during apply, and stop or replan when observations exceed the accepted survey contract.
+- **Resolution criteria:** A test site containing a hidden void or unexpected subsurface block is either rejected during planning or discovered during bounded apply and causes safe replanning without exceeding the five-block fill policy.
+
+### OCIA-035: Returning to the charging coordinates does not prove charging
+
+- **Status:** Open
+- **Area:** Charging and recovery
+- **Risk:** The robot may reach the nominal station while misaligned, unpowered, or beside a Charger whose required redstone activation is disabled, then falsely report a successful return.
+- **Current evidence:** The conduit-powered Charger restored the Robot only after a Lever activated it. Autonomous docking, alignment, energy-increase detection, charge waiting, and resume have not been tested.
+- **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
+- **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
 
 ## Resolved Issues
 
@@ -286,4 +322,4 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Superseded
 - **Area:** Legacy completion semantics
 - **Original risk:** The RS processing task could complete at token deposit while the robot later failed to return to charge.
-- **Disposition:** RS task completion is now only a resource-provisioning event. Required milestones are `construction_verified`, `resources_reconciled`, `returned_to_charge`, and `mission_complete`; no `rs_acknowledged` milestone remains.
+- **Disposition:** RS task completion is now only a resource-provisioning event. Deployment state separately records construction verification, reconciliation completion and balance, verified charging return, and mission outcome; no `rs_acknowledged` milestone remains.
