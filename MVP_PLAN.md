@@ -91,7 +91,7 @@ Keep the implementation small and explicit. Modules should return tables of func
 | `lib/ocia/protocol.lua` | Versioned request/reply schemas, validation, compact serialization, and correlation fields. |
 | `lib/ocia/pose.lua` | Coordinate and heading math with no component calls. |
 | `lib/ocia/model.lua` | Validation helpers for observations, plans, manifests, and durable status values. |
-| `lib/ocia/state.lua` | Versioned checkpoint loading and replace-safe writes. |
+| `lib/ocia/state.lua` | Versioned append-only journal, checkpoint loading, compaction, and replace-safe recovery boundaries. |
 
 ### Controller modules
 
@@ -256,15 +256,15 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 **Prerequisites:** Current working `drive.lua` and `robotd.lua`.
 
-**Implementation:** Protocol version 1, request ID, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, a durable completed-result cache, relative pose, controller probe, and local recovery tool now exist in the disk snapshots. Legacy `(command, count)` handling remains available to `drive.lua`; legacy physical movement deliberately invalidates autonomous pose.
+**Implementation:** Protocol version 1, execution epochs and monotonic physical sequences, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, an append-only execution journal with bounded recent results and compaction, relative pose, controller probe, and explicit local commissioning/recovery now exist in the disk snapshots. Legacy `(command, count)` handling remains available to `drive.lua`; legacy physical movement deliberately invalidates autonomous pose.
 
 **In-game test:** Send addressed status, turn, and one-step movement requests. Delay or duplicate a request and restart the daemon with the port already open.
 
 **Acceptance:** Only Wheatley executes the addressed command; replies correlate exactly; a duplicate completed request returns its cached result; malformed or unauthorized traffic changes nothing; legacy driving still works.
 
-**Failure/recovery:** Timeout leaves the controller in an ambiguous state until status reconciliation. An interrupted in-flight physical request becomes `recovery_required` and is not replayed.
+**Failure/recovery:** Timeout leaves the controller in an ambiguous state until status reconciliation. A restart from `prepared` records definite nonexecution if that resolution persists. A restart from `executing` reports unknown physical outcome, invalidates trusted pose, and never replays the request.
 
-**Unresolved dependencies:** Controller and robot modem UUIDs must be recorded; the new daemon, file journal, actual modem behavior, duplicate replay, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). The fail-closed 256-result retention bound needs an epoch/archive design before long deployments can exceed it.
+**Unresolved dependencies:** Controller and robot modem UUIDs must be recorded; the new daemon, append-only journal, compaction, epoch commissioning, actual modem behavior, duplicate and retired-request handling, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). OpenOS memory, disk, flush, rename, and timing behavior remain unmeasured.
 
 ### Milestone 2: Durable pose, energy, and hardware primitives
 
@@ -429,7 +429,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ## Immediate Coding Milestone
 
-Milestone 1 code is implemented and host-tested: 28 Lua 5.3 tests with 148 assertions pass. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
+Milestone 1 code is implemented and host-tested: 26 Lua 5.3 tests with 6262 assertions pass after the final hardening pass on 2026-10-30. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
 
 After that acceptance passes, proceed to Milestone 2 hardware characterization and durable controller-side pose/session work. Do not add Geolyzer routing, RS calls, planning, or construction until the transport's actual OpenOS filesystem, modem, duplicate, timeout, and recovery behavior is recorded.
 

@@ -13,7 +13,7 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Controller program: `home/drive.lua`
 - Robot program: `home/robotd.lua`
 - Wireless port: `4242`
-- Milestone 1 command transport, relative-pose math, and robot execution journaling are implemented in the repository snapshots and host-tested. They have not yet been deployed or verified in Minecraft.
+- Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented in the repository snapshots and host-tested. They have not yet been deployed or verified in Minecraft.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
@@ -152,11 +152,13 @@ Implemented snapshot paths:
 
 Protocol version 1 uses eight modem parts and a bounded encoded payload. It supports read-only `status` and one-operation turns/moves. The controller unicasts to the configured robot, validates the reply sender and correlation fields, and reports `succeeded`, `failed`, or `unknown`; a timeout is `unknown`.
 
-Before a physical call, Wheatley persists `prepared` and then `executing`. A completed request and result are retained durably. Duplicate content returns the cached result; the same ID with different content is rejected. Restart from `prepared` becomes definite non-execution. Restart from `executing`, an operation exception, or failure to persist completion becomes `recovery_required` with untrusted pose. This is conservative at-most-once behavior, not a claim of crash-proof exactly-once execution.
+Physical requests use `p:<execution-epoch>:<monotonic-sequence>`. Explicit origin commissioning creates the epoch and begins at high water zero. Before a physical call, Wheatley appends `prepared`—which allocates and advances the high-water sequence—and then `executing`. A completed record preserves the result and resulting pose. Restart from a healthy `prepared` record appends a definite nonexecution result; restart from `executing`, an operation exception, or failure to persist completion becomes `recovery_required` with untrusted pose and an unknown physical outcome.
 
-The default completed-result capacity is 256. It does not evict automatically: a full cache rejects new requests so an old ID cannot silently become executable again. A safe long-running retention/epoch policy remains future work before deployments can exceed this bound.
+The final hardening pass corrected a certainty defect: a matching retry of an unresolved `executing` request was previously classified as `rejected / retired_request` because the handler consulted high water before the in-flight record. The executor now validates matching versus conflicting unresolved identity first, reports `recovery_required / physical_outcome_unknown` for `executing`, and never calls the physical operation again. Failure to persist a prepared-request resolution also remains recovery-required and non-executable.
 
-Host result on 2026-10-30: Lua 5.3 syntax checks passed and `tests/run.lua` passed 28 tests / 148 assertions in an Alpine 3.20 container. No in-game result is implied.
+Full results are bounded by `recent_results` (default 32, maximum 64). Older results may be retired, but the epoch and high-water marker keep their sequences non-replayable. The journal compacts at configured record or byte thresholds (defaults 128 records or 65536 bytes) into a verified checkpoint plus retained results. Explicit recovery at a physically verified origin creates a new epoch; packets from prior epochs are rejected as stale.
+
+Host result on 2026-10-30: the pre-change baseline reproduced 4 failures in 25 tests / 6155 assertions, including the ambiguous-retry defect. After correction and regression expansion, `tests/run.lua` passed 26 tests / 6262 assertions in an Alpine 3.20 Lua 5.3 container. No OpenOS or in-game result is implied.
 
 ### OpenOS REPL behavior
 
@@ -580,7 +582,7 @@ Goal: turn `robotd.lua` into a recoverable execution agent.
 
 Related risks: OCIA-003, OCIA-004, OCIA-005, OCIA-008, OCIA-010, OCIA-014.
 
-Implementation status: the Milestone 1 subset—relative pose, physical-request journal, duplicate cache, protected movement dispatch, and local origin reset—is host-tested. Controller deployment checkpoints, hardware primitives, and all in-game acceptance remain pending for later work.
+Implementation status: the Milestone 1 subset—relative pose, append-only physical-request journal, explicit epoch commissioning, bounded recent-result cache, safe retirement, compaction, protected movement dispatch, and local origin reset—is host-tested. Controller deployment checkpoints, hardware primitives, and all in-game acceptance remain pending for later work.
 
 ### Phase 3: Implement verified dirt placement
 
@@ -742,9 +744,10 @@ Deploy and accept Milestone 1 using [MILESTONE1.md](MILESTONE1.md):
 
 1. Discover and record the real controller and robot modem UUIDs in `/etc/ocia.cfg` on both machines.
 2. Synchronize only the listed snapshot application files while the programs are stopped.
-3. Start `robotd.lua`, verify restart-safe port handling, then run the default read-only `ociactl.lua` status probe.
-4. Confirm legacy `drive.lua status`, one supervised turn, one clear-area movement, duplicate replay, lost-reply behavior, and restart recovery.
-5. Record actual results before changing Milestone 1 or related issues to mitigated/complete.
+3. With Wheatley physically at the origin facing North and the daemon stopped, inspect state and explicitly run `ocia-recover.lua reset-origin` to create the first execution epoch.
+4. Start `robotd.lua`, verify restart-safe port handling, then run the default read-only `ociactl.lua` status probe and record epoch/high-water/journal diagnostics.
+5. Confirm legacy `drive.lua status`, one automatically numbered supervised turn, one clear-area movement, cached duplicate and conflicting reuse behavior, and compaction/restart behavior.
+6. Use only safe harnesses for lost-reply, interrupted-`prepared`, and interrupted-`executing` acceptance. Record actual results before changing Milestone 1 or related issues to mitigated/complete.
 
 The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
@@ -767,7 +770,7 @@ For charging, measure robot energy at the expected charging pose with the Lever 
 - Existing source and unrelated user changes must be preserved carefully.
 - Repository code now has guarded, owned port handling on both endpoints; only the older controller guard has prior in-game evidence, so the new daemon behavior remains pending.
 - Legacy physical driving intentionally marks autonomous pose untrusted. Return to origin facing North and use the local recovery tool before autonomous work resumes.
-- Completed request retention is fail-closed at 256 records; no safe cache rotation or protocol-epoch procedure exists yet.
+- Full completed results are retained only for the configured recent window, but the durable epoch/high-water pair prevents retired sequences from executing again. Explicit origin recovery creates a new epoch and makes all prior-epoch packets stale. This behavior and its memory/disk cost remain unverified on OpenOS.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
 - Detailed item-stack inspection requires the now-installed Inventory Controller Upgrade; its operational methods remain untested.
 - The Inventory Controller Upgrade does not identify terrain blocks.

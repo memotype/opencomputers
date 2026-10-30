@@ -220,9 +220,9 @@ Execution is journaled at the command level; physical Minecraft operations are n
 5. The robot returns the result to the controller.
 6. The controller advances only after validating the acknowledgment.
 
-Completed request identifiers may be replayed safely by returning their recorded results. An operation found in progress after a restart is ambiguous and requires reconciliation; it must not be executed again automatically.
+Retained completed request identifiers may be replayed safely by returning their recorded results. Retired identifiers remain non-executable even when their full result is no longer retained. An operation found in progress after a restart is ambiguous and requires reconciliation; it must not be executed again automatically.
 
-Durable result retention must fail closed rather than silently forget an identifier that could be replayed. Retention limits and any future epoch or archive procedure are explicit operating constraints, not permission to repeat an old operation.
+Durable request history must fail closed rather than silently make an allocated physical request executable again. The robot may retain only a bounded window of full results, but it must durably preserve an execution epoch and monotonic high-water sequence so retired requests in the active epoch remain non-replayable. A new epoch may be established only at an explicit recovery boundary after position and heading are physically reconciled; packets from earlier epochs remain stale.
 
 The existing interactive remote-driving workflow remains available for diagnosis and manual recovery. Protocol evolution must preserve that capability or provide an equivalent recovery path. Because legacy movement has no request correlation, any manual physical command invalidates autonomous pose and requires an explicit origin/heading recalibration before autonomous execution resumes.
 

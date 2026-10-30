@@ -36,9 +36,9 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Recovery and idempotency
 - **Risk:** Retrying a movement or turn after a lost reply may execute the action twice and corrupt the robot pose.
-- **Current evidence:** The robot snapshot now journals `prepared` then `executing`, durably retains completed results, returns identical duplicates without another physical call, and marks restart from `executing` as recovery-required. Host fault injection passes; OpenOS persistence and supervised lost-reply behavior are untested.
+- **Current evidence:** The robot appends `prepared` then `executing`, records completed results, returns retained duplicates without another physical call, and marks restart from `executing` as recovery-required. The final hardening pass fixed a source defect that had mislabeled a matching unresolved retry as retired: it now returns `physical_outcome_unknown`, preserves untrusted pose, validates conflicts, and never invokes the physical callback. Filesystem-backed restart and fault injection tests pass; OpenOS persistence and supervised lost-reply behavior are untested.
 - **Required mitigation:** Journal in-flight and completed requests on the robot, cache completed results, and enter recovery-required state after an interrupted in-flight action.
-- **Resolution criteria:** Duplicate completed requests return their original result without repeating the action, and interrupted requests are not replayed automatically.
+- **Resolution criteria:** Duplicate completed requests return their original result without repeating the action; interrupted requests are not replayed automatically; and an unresolved executing retry reports unknown outcome rather than definite rejection in a supervised OpenOS test.
 
 ### OCIA-004: Controller and robot do not track pose
 
@@ -54,7 +54,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Persistence
 - **Risk:** A program, computer, game, or host restart can lose the authoritative step and cause repeated or skipped construction.
-- **Current evidence:** Robot request phase, pose, and completed results now use a temporary-file/backup/rename store with validation and fail-closed behavior. Host restart/failure tests pass. Controller deployment state is not implemented, and host tests cannot prove OpenOS or world-save crash durability.
+- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Bounded compaction writes and verifies a checkpoint plus retained results using `.switch`, `.new`, `.old`, and same-filesystem renames; incomplete replacement artifacts fail closed. Host restart/failure tests pass. Controller deployment state is not implemented, and host tests cannot prove OpenOS or world-save crash durability.
 - **Required mitigation:** Persist versioned controller deployment state and robot execution state using replace-safe writes.
 - **Resolution criteria:** Restart tests either resume from an unambiguous checkpoint or stop with an explicit recovery requirement.
 
@@ -301,14 +301,14 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
 - **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
 
-### OCIA-036: Completed-request retention has a finite safe capacity
+### OCIA-036: Bounded result retention and epoch lifecycle need OpenOS validation
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Protocol retention
-- **Risk:** Forgetting an old request ID can permit a delayed duplicate to execute again, while retaining every result forever can exhaust Wheatley's limited memory or disk.
-- **Current evidence:** Milestone 1 durably retains up to 256 completed requests and fails closed when full. It never automatically evicts an ID. This is safe for bounded acceptance and early prototypes but cannot support an indefinitely long deployment.
-- **Required mitigation:** Define a durable protocol epoch or execution-session lifecycle that makes earlier IDs unambiguously stale before archiving their results. Measure retained-state size on OpenOS and keep a compact audit trail. Never clear the cache merely to continue execution.
-- **Resolution criteria:** An in-game test rotates to a new durable epoch only through an explicit safe boundary; packets from the prior epoch are rejected, current duplicates remain suppressed, and state remains within measured memory/disk limits.
+- **Risk:** If high water or epoch identity is not durable across compaction and recovery, a delayed duplicate could become executable; if the bounded journal still exceeds OpenOS memory, disk, or timing limits, Wheatley may fail closed during a mission.
+- **Current evidence:** The source now uses explicit execution epochs, contiguous physical sequences, and a durable high-water marker. It retains a bounded recent window (default 32, maximum 64), safely rejects older active-epoch requests as `retired_request`, compacts the journal, and rejects prior-epoch packets after explicit origin recommissioning. Host tests run 1000 operations with bounded records/bytes and verify retained duplicates, retired requests, compaction restart, and stale epochs. OpenOS resource use and filesystem behavior are unmeasured.
+- **Required mitigation:** Validate bounded retention, compaction, retired-request rejection, and explicit epoch rotation on Wheatley's OpenOS filesystem. Measure journal size, memory, and persist time under the production configuration. Never create a new epoch except at an explicit safe boundary with physically reconciled pose.
+- **Resolution criteria:** An in-game test demonstrates bounded storage across compaction, retained duplicates remain suppressed, retired active-epoch sequences cannot execute, a new epoch is created only through explicit origin recovery, and prior-epoch packets are rejected within measured memory/disk limits.
 
 ## Resolved Issues
 

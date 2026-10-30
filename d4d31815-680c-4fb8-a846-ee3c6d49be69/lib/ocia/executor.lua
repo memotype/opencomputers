@@ -38,7 +38,8 @@ function executor.new(options)
       local item = self.snapshot.in_flight
       local payload = protocol.encodeFields({
         code = "interrupted_before_execution",
-        message = "request was prepared but physical execution had not begun"
+        message = "request was prepared but physical execution had not begun",
+        physical_outcome = "not_started"
       })
       local appended, reason = self.store.append(self.snapshot, {
         kind = "completed", sequence = item.sequence,
@@ -117,6 +118,28 @@ function executor:completedReply(entry)
   return {outcome = entry.outcome, payload = payload}
 end
 
+function executor:inFlightReply(request, identity)
+  local item = self.snapshot.in_flight
+  if not item or item.sequence ~= identity.sequence then return nil end
+  if item.request_id ~= request.request_id or item.fingerprint ~= request.fingerprint then
+    return result("rejected", "request_id_conflict",
+      "in-flight sequence was already used with different request contents")
+  end
+
+  local payload = self:statusPayload()
+  if item.phase == "executing" then
+    payload.physical_outcome = "unknown"
+    return result("recovery_required", "physical_outcome_unknown",
+      "matching request may have executed; reconcile physical state before recovery",
+      payload)
+  end
+
+  payload.physical_outcome = "not_started"
+  return result("recovery_required", "prepared_resolution_unpersisted",
+    "request did not begin physical execution, but its resolution is not durably authoritative",
+    payload)
+end
+
 function executor:handle(request)
   if request.operation == "status" then
     return result("succeeded", "status", "fresh status returned", self:statusPayload())
@@ -132,6 +155,9 @@ function executor:handle(request)
     return result("rejected", "stale_epoch",
       "request belongs to a retired execution epoch", self:statusPayload())
   end
+
+  local inFlight = self:inFlightReply(request, identity)
+  if inFlight then return inFlight end
 
   if identity.sequence <= self.snapshot.high_water then
     local cached = state.findRecent(self.snapshot, identity.sequence)

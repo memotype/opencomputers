@@ -359,7 +359,37 @@ test("restart after prepared records definite non-execution", function()
   local restarted, calls = makeExecutor(journalStore(vfs))
   equal(restarted.boot_classification, "not_started")
   equal(restarted.snapshot.mode, "ready")
-  equal(restarted:handle(item).outcome, "failed")
+  local conflict = restarted:handle(physical(1, "turn_left"))
+  equal(conflict.outcome, "rejected")
+  equal(conflict.payload.code, "request_id_conflict")
+  local resolved = restarted:handle(item)
+  equal(resolved.outcome, "failed")
+  equal(resolved.payload.code, "interrupted_before_execution")
+  equal(resolved.payload.physical_outcome, "not_started")
+  equal(resolved.payload.duplicate, "true")
+  equal(restarted.snapshot.pose.trusted, true)
+  equal(calls(), 0)
+end)
+
+test("prepared recovery persistence failure remains non-executable", function()
+  local vfs, store = commissionedFilesystem()
+  local snapshot = assert(store.load())
+  local item = physical(1, "move_forward")
+  assert(store.append(snapshot, {kind = "prepared", epoch = epoch, sequence = 1,
+    request_id = item.request_id, fingerprint = item.fingerprint,
+    deployment_id = item.deployment_id, operation = item.operation}))
+  vfs.setFault("write", 1, false)
+  local restarted, calls = makeExecutor(journalStore(vfs))
+  vfs.clearFault()
+  equal(restarted.snapshot.mode, "recovery_required")
+  equal(restarted.snapshot.pose.trusted, false)
+  local retry = restarted:handle(item)
+  equal(retry.outcome, "recovery_required")
+  equal(retry.payload.code, "prepared_resolution_unpersisted")
+  equal(retry.payload.physical_outcome, "not_started")
+  local conflict = restarted:handle(physical(1, "turn_left"))
+  equal(conflict.outcome, "rejected")
+  equal(conflict.payload.code, "request_id_conflict")
   equal(calls(), 0)
 end)
 
@@ -375,7 +405,21 @@ test("restart after executing is ambiguous and never replays", function()
   local restarted, calls = makeExecutor(journalStore(vfs))
   equal(restarted.snapshot.mode, "recovery_required")
   equal(restarted.snapshot.pose.trusted, false)
-  equal(restarted:handle(item).outcome, "recovery_required")
+  equal(restarted.snapshot.pose.x, 0)
+  equal(restarted.snapshot.pose.z, 0)
+  local retry = restarted:handle(item)
+  equal(retry.outcome, "recovery_required")
+  equal(retry.payload.code, "physical_outcome_unknown")
+  equal(retry.payload.physical_outcome, "unknown")
+  local duplicate = restarted:handle(item)
+  equal(duplicate.outcome, "recovery_required")
+  equal(duplicate.payload.code, "physical_outcome_unknown")
+  local conflict = restarted:handle(physical(1, "turn_left"))
+  equal(conflict.outcome, "rejected")
+  equal(conflict.payload.code, "request_id_conflict")
+  equal(restarted.snapshot.pose.trusted, false)
+  equal(restarted.snapshot.pose.x, 0)
+  equal(restarted.snapshot.pose.z, 0)
   equal(calls(), 0)
 end)
 
@@ -403,21 +447,19 @@ end)
 
 test("append open, write, partial-write, and flush failures fail closed", function()
   for _, fault in ipairs({
-    {"open", false}, {"write", false}, {"write", true}, {"flush", false}
+    {"open", false, "ready"}, {"write", false, "ready"},
+    {"write", true, "recovery_required"}, {"flush", false, "ready"}
   }) do
     local vfs, store = commissionedFilesystem()
-    vfs.setFault(fault[1], 1, fault[2])
     local instance, calls = makeExecutor(store)
+    vfs.setFault(fault[1], 1, fault[2])
     local reply = instance:handle(physical(1, "move_forward"))
     equal(reply.outcome, "rejected")
+    equal(reply.payload.code, "persistence_failed_before_execution")
     equal(calls(), 0)
     vfs.clearFault()
     local restarted, restartCalls = makeExecutor(journalStore(vfs))
-    if fault[1] == "open" or (fault[1] == "write" and not fault[2]) then
-      equal(restarted.snapshot.mode, "ready")
-    else
-      equal(restarted.snapshot.mode, "recovery_required")
-    end
+    equal(restarted.snapshot.mode, fault[3], fault[1] .. "/" .. tostring(fault[2]))
     equal(restartCalls(), 0)
   end
 end)
@@ -431,7 +473,12 @@ test("completion write interruption never permits a second execution", function(
     equal(calls(), 1)
     vfs.clearFault()
     local restarted, restartCalls = makeExecutor(journalStore(vfs))
-    equal(restarted:handle(physical(1, "move_forward")).outcome, "recovery_required")
+    local retry = restarted:handle(physical(1, "move_forward"))
+    equal(retry.outcome, "recovery_required")
+    if not partial then
+      equal(retry.payload.code, "physical_outcome_unknown")
+      equal(retry.payload.physical_outcome, "unknown")
+    end
     equal(restartCalls(), 0)
   end
 end)
@@ -469,7 +516,7 @@ test("new, old, or switch artifacts always force explicit recovery", function()
   end
 end)
 
-test("all compaction replacement failures reconstruct fail-closed", function()
+test("compaction failures preserve a safe primary or reconstruct fail-closed", function()
   local cases = {
     {"open", 1}, {"write", 1}, {"flush", 1}, {"read", 1},
     {"rename", 1}, {"rename", 2}, {"remove", 1}, {"remove", 2}
@@ -484,8 +531,15 @@ test("all compaction replacement failures reconstruct fail-closed", function()
     equal(compacted, nil, fault[1] .. "/" .. fault[2])
     vfs.clearFault()
     local restarted, calls = makeExecutor(journalStore(vfs, 4))
-    equal(restarted.snapshot.mode, "recovery_required")
-    equal(restarted:handle(physical(1)).outcome, "recovery_required")
+    if fault[1] == "open" and fault[2] == 1 then
+      equal(restarted.snapshot.mode, "ready")
+      local duplicate = restarted:handle(physical(1))
+      equal(duplicate.outcome, "succeeded")
+      equal(duplicate.payload.duplicate, "true")
+    else
+      equal(restarted.snapshot.mode, "recovery_required")
+      equal(restarted:handle(physical(1)).outcome, "recovery_required")
+    end
     equal(calls(), 0)
   end
 end)

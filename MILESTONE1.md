@@ -2,6 +2,8 @@
 
 This runbook covers the addressed, recoverable command transport implemented for Milestone 1. Durable architecture remains in [CODEX.md](CODEX.md), current project state in [SCRATCH.md](SCRATCH.md), risks in [ISSUES.md](ISSUES.md), and the dependency roadmap in [MVP_PLAN.md](MVP_PLAN.md).
 
+Milestone 1 is implemented and host-tested. It is not accepted until the supervised OpenOS and Minecraft checks below have recorded real results.
+
 ## Protocol Contract
 
 OCIA protocol version 1 uses modem port `4242` and exactly eight packet data parts. Values are ordinary modem arguments; the final argument/result field is a percent-encoded, sorted key/value payload. Received data is parsed and validated, never executed as Lua.
@@ -20,51 +22,99 @@ Reply:
 
 The supported operations are `status`, `turn_left`, `turn_right`, `move_forward`, `move_backward`, `move_up`, and `move_down`. They take no arguments. Each movement or turn is exactly one physical operation. Outcomes are `succeeded`, `failed`, `rejected`, and `recovery_required`; controller certainty is respectively definite success, definite failure, definite failure, and unknown. A controller timeout is also unknown, not failure.
 
-The result payload is limited to 4096 encoded bytes, below the installed OpenComputers default packet limit. Both endpoints validate protocol version, message type, identifiers, operation, payload, expected component address, and expected modem sender. Sender matching prevents accidental cross-control; it is not cryptographic authentication.
-
-## Execution Journal
-
-Wheatley persists `/var/lib/ocia/robot.state` with a verified temporary file, previous-file backup, and same-filesystem rename. For a physical operation, the transitions are:
+Status request identifiers use `s:<token>`. Physical request identifiers use:
 
 ```text
-ready
-  -> persist prepared
-  -> persist executing
+p:<execution-epoch>:<monotonic-sequence>
+```
+
+The first physical sequence in an epoch is `1`; every later physical request must use exactly the durable high-water sequence plus one. `ociactl.lua` obtains a fresh status before an automatically numbered physical command and refuses to allocate an identifier unless Wheatley reports a trusted pose, `ready` mode, an epoch, and a numeric high-water marker. `--id` is reserved for deliberate replay and fault tests and must contain a valid identifier in the format above.
+
+The result payload is limited to 4096 encoded bytes, below the installed OpenComputers default packet limit. Both endpoints validate protocol version, message type, identifiers, operation, payload, expected component address, and expected modem sender. Sender matching prevents accidental cross-control; it is not cryptographic authentication.
+
+## Execution Journal and Retention
+
+Wheatley stores an append-only, checksummed journal at `/var/lib/ocia/robot.state`. A journal begins with a versioned checkpoint. Normal physical execution appends these records:
+
+```text
+ready checkpoint
+  -> append prepared (advances high_water)
+  -> append executing
   -> call one Robot API operation
-  -> persist result, pose, and completed request
+  -> append completed (result and resulting pose)
   -> send reply
 ```
 
-A restart from `prepared` proves the Robot API call had not begun and records a definite failed result. A restart from `executing` cannot prove whether the call changed the world, so the daemon marks pose untrusted and enters `recovery_required`. It does not execute the request again.
+`high_water` means that a sequence has been durably allocated; it does not by itself prove completion. The executor checks a matching unresolved `in_flight` record before classifying a sequence as retired.
 
-Completed request records include the request fingerprint and original result. Repeating an identical retained request returns the cached result. Reusing its ID with different content is rejected. Version 1 retains up to the configured number of completed records (default 256) and fails closed when full; it never silently evicts an ID and thereby permits replay. There is intentionally no automatic cache-clearing procedure yet. Retention lifecycle/epoch management is required before long deployments can exceed this bound.
+Restart classification is deliberately conservative:
 
-This is conservative at-most-once execution, not crash-proof exactly-once execution. OpenOS exposes buffered file operations but no guarantee equivalent to a hardware-backed `fsync`; a host, game, or storage failure at an unfortunate point can still require physical reconciliation. The journal makes known failure windows explicit instead of retrying optimistically.
+- A healthy journal ending at `prepared` proves the Robot API call had not begun. Startup appends a `failed / interrupted_before_execution` completion with `physical_outcome=not_started`. Only after that completion persists is the result a definite nonexecution result.
+- If that prepared-request resolution cannot be persisted, Wheatley remains `recovery_required`; it does not execute the request.
+- A journal ending at `executing` cannot prove whether the physical call changed the world. Wheatley marks pose untrusted, reports `recovery_required / physical_outcome_unknown`, and never executes the matching request again.
+- A conflicting reuse of an unresolved sequence is rejected by request identity and fingerprint checks without invoking the Robot API.
+- A durable `completed` record returns its original cached outcome when the identical request is delivered again.
 
-## Manual Compatibility
+The journal retains only a bounded recent-result window, configured by `recent_results` (default `32`, allowed `1..64`). Older full results are retired, but their sequences remain below or equal to the durable high-water marker. A delayed request for such a sequence receives `rejected / retired_request` and cannot execute again. That rejection describes the attempted replay; because the original result has been retired, it is not evidence that the earlier physical operation failed. This permits bounded memory and disk use without forgetting which sequences were allocated.
 
-`drive.lua` retains `f/b/l/r/u/d [count]`, `status`, and `q`. Its legacy packet remains broadcast for compatibility, but Wheatley accepts it only from the configured controller address. Protocol packets begin with `OCIA` and are never dispatched through the legacy parser.
+When `compact_records` (default `128`) or `compact_bytes` (default `65536`) is reached, the daemon writes a replacement journal containing a new checkpoint plus the retained recent results. Replacement uses `.switch`, `.new`, and `.old` artifacts, verifies the candidate journal, and uses same-filesystem renames. Any replacement artifact found at startup is treated as uncertain and requires explicit recovery. A compaction failure before any artifact or primary mutation leaves the prior primary journal authoritative; failures after replacement begins fail closed.
 
-Legacy physical commands do not have request IDs or duplicate suppression. Before executing one, Wheatley durably marks autonomous pose untrusted and enters `recovery_required`. This keeps manual driving useful for recovery while preventing later autonomous work from trusting manual movement. Restore Wheatley physically to the charging origin facing North, stop `robotd.lua`, run `ocia-recover.lua reset-origin` locally, and restart the daemon before resuming autonomous motion.
+This is conservative at-most-once execution, not crash-proof exactly-once execution. OpenOS buffered writes and `flush()` do not establish hardware-backed `fsync` or transactional Minecraft operations. A crash can still leave physical state requiring operator reconciliation.
 
-Both controller programs and the daemon record whether they opened port 4242 and close it only when they own that open action. Concurrent controller programs still compete for replies on the same event queue and should not be run together.
+## Commissioning and Recovery
 
-## Configuration
+Autonomous movement is disabled until an operator explicitly commissions the origin. Commissioning creates a new random execution epoch, resets its high-water marker to zero, and writes a fresh checkpoint. It is never automatic.
 
-On each OpenOS computer, use `components -l modem` or `lua -e 'print(require("component").modem.address)'` to obtain the full local wireless modem address. Do not use the UUID-named HDD directory as a modem address.
+With `robotd.lua` stopped, place Wheatley at the configured charging origin `(0,0,0)` facing North, then run locally on Wheatley:
 
-Copy the supplied example to `/etc/ocia.cfg` on both machines and replace both placeholders with the same real addresses:
+```sh
+ocia-recover.lua show
+ocia-recover.lua reset-origin
+```
+
+Type `RESET` only after physically verifying position and heading. The new epoch permanently makes physical packets from every prior epoch stale. Commissioning may clear incomplete journal replacement artifacts because the operator is explicitly establishing new trusted physical state; do not use it merely to make an error disappear.
+
+Legacy `drive.lua` retains `f/b/l/r/u/d [count]`, `status`, and `q`. Its packet remains broadcast for compatibility, but Wheatley accepts it only from the configured controller address. Before legacy physical movement, Wheatley durably invalidates autonomous pose and enters `recovery_required`. Restore the physical origin and commission a new epoch before autonomous movement resumes.
+
+Both controller programs and the daemon close port 4242 only if they opened it. Concurrent controller programs still compete for replies on the same event queue and must not be run together.
+
+## Configuration and Diagnostics
+
+On each OpenOS computer, obtain the full local wireless modem address with `components -l modem` or:
+
+```sh
+lua -e 'print(require("component").modem.address)'
+```
+
+Do not use a UUID-named HDD directory as a modem address. Copy the supplied example to `/etc/ocia.cfg` on both machines and set the same real controller and robot addresses:
 
 ```sh
 cp /etc/ocia.cfg.example /etc/ocia.cfg
 edit /etc/ocia.cfg
 ```
 
-`controller_address` must be the controller modem; `robot_address` must be Wheatley's modem. Keep protocol version 1 and port 4242. Configuration loading fails rather than accepting placeholders or unknown keys.
+Current keys and defaults are:
 
-## Safe Deployment
+```text
+controller_address=<full controller modem UUID>
+robot_address=<full Wheatley modem UUID>
+port=4242
+protocol_version=1
+timeout=8
+recent_results=32
+compact_records=128
+compact_bytes=65536
+legacy_enabled=true
+state_path=/var/lib/ocia/robot.state
+```
 
-The repository snapshots are canonical. The live disks are deployment targets. Stop `robotd.lua`, `drive.lua`, and `ociactl.lua` before replacing files; never replace Wheatley's daemon while a physical command is active. With Minecraft stopped, or after otherwise ensuring no OpenOS process is using the files, synchronize only the listed application paths:
+Configuration rejects placeholders, unknown keys, invalid bounds, and a local modem address that does not match the configured role. The current bounds are timeout `(0,120]` seconds, recent results `1..64`, compaction records `16..1024`, and compaction bytes `8192..262144`. `ociactl.lua` status displays daemon mode, trusted pose, energy, memory, epoch/high-water, in-flight or latest retained request, journal health, generation, record count, byte count, last persist duration, and retained-result count.
+
+## Safe Repository-to-OpenOS Deployment
+
+The repository snapshots are canonical; live OpenOS disks are deployment targets. Stop `robotd.lua`, `drive.lua`, and `ociactl.lua` before replacing files. Never replace Wheatley's daemon during a physical request. Stop Minecraft, or otherwise establish that no OpenOS process is using the target files, before copying.
+
+Synchronize only these application paths:
 
 ```text
 controller snapshot -> live controller HDD
@@ -88,52 +138,44 @@ robot snapshot -> live robot HDD
   /etc/ocia.cfg.example
 ```
 
-Create `/lib/ocia` and `/var/lib/ocia` if needed. Do not overwrite a configured `/etc/ocia.cfg` with the example. `filesystem.bufferChanges=false` permits external edits to become visible, but a successful host copy is not proof that a running OpenOS process durably checkpointed its state.
+Do not copy repository runtime state, do not overwrite `/etc/ocia.cfg`, and do not synchronize whole HDD trees blindly. The journal directory is created by commissioning when needed. `filesystem.bufferChanges=false` permits external file changes to become visible, but a successful host copy does not prove OpenOS persistence behavior.
 
-On Wheatley:
+For a first deployment or any deliberate pose recovery:
 
-```sh
-robotd.lua
-```
-
-On the controller, `ociactl` defaults to a read-only status request:
-
-```sh
-ociactl.lua
-ociactl.lua left
-ociactl.lua forward
-```
-
-Movement and turn subcommands are world-changing and execute only when explicitly supplied. `--id ID` permits a supervised duplicate-request test; never reuse an ID for a different operation. `--deployment ID` supplies a deployment correlation identifier.
+1. Put Wheatley at the origin facing North.
+2. Configure `/etc/ocia.cfg` on both computers.
+3. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.
+4. Start `robotd.lua`.
+5. Run `ociactl.lua` with no arguments before any physical command.
 
 ## Host Test
 
-The repository test suite requires Lua 5.3. If it is not installed on the host, the tested container command is:
+The suite requires Lua 5.3. The verified repository command is:
 
 ```sh
 docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
   sh -c 'apk add --no-cache lua5.3 >/dev/null && lua5.3 tests/run.lua'
 ```
 
-It tests protocol rejection/correlation, pose math, duplicate handling, request-ID conflicts, journal restart classification, injected persistence failures, cached restart behavior, transport filtering/timeouts, payload bounds, and legacy/protocol separation. These mocks do not establish in-game modem, filesystem, or movement behavior.
+On 2026-10-30 the final hardening suite passed `26 tests, 6262 assertions, 0 failures`. It covers protocol rejection/correlation, epochs and sequence gaps, pose math, prepared/executing restart classification, matching and conflicting unresolved retries, retained and retired results, no-replay behavior, append and completion-write failures, corrupted journals, replacement artifacts, compaction faults, bounded scaling, transport timeouts, and legacy separation. These host mocks do not establish real OpenOS filesystem, modem, Robot API, memory, or timing behavior.
 
 ## Supervised In-Game Acceptance
 
-Use a clear, player-loaded test area. Record both modem addresses first. Do not conduct movement or interruption tests at the charger if the adjacent block is unsafe.
+Use a clear, player-loaded test area. Keep Wheatley away from unsafe adjacent blocks during movement and interruption tests. Record commands, identifiers, physical observations, replies, and journal diagnostics.
 
-1. Boot Wheatley normally and confirm OpenOS sees the wireless modem and expected hardware. Expected: normal shell and no component errors.
-2. Configure both `/etc/ocia.cfg` files. Start `robotd.lua`. Expected: it reports port 4242 and mode `ready` (or accurately reports a pre-existing recovery state).
-3. Interrupt and restart the daemon while port 4242 remains open. Expected: no port-open assertion failure.
-4. Compare each configured address with `component.modem.address`. Expected: exact full-address matches; a mismatch prevents startup.
-5. Run `ociactl.lua` with no arguments. Expected: `Certainty: succeeded`, `Status: succeeded`, energy, daemon mode, and pose; Wheatley does not move.
-6. Send an unrelated/stale reply from another computer if available, then repeat status. Expected: the probe ignores it and accepts only the correlated Wheatley reply.
-7. Run `drive.lua` and issue `status`. Expected: the legacy `READY` and battery reply still arrives. Exit with `q` and confirm other port users remain functional.
-8. In a clear area, record Wheatley's heading and run `ociactl.lua left --id acceptance-turn-1`. Expected: one left turn, one successful reply, and the reported heading changes once.
-9. Select one unobstructed block and run one explicit movement such as `ociactl.lua forward --id acceptance-move-1`. Expected: exactly one block of motion and one pose transition.
-10. Repeat the exact command with the exact same ID. Expected: the cached result says `duplicate=true`; Wheatley does not move or turn again. Reusing that ID with another operation must be rejected.
-11. Simulate a lost reply by temporarily preventing the controller from receiving after a supervised request, without sending a new ID. Expected: the controller reports `Certainty: unknown`. Retrying the same retained ID returns the cached result without repeating motion.
-12. For restart recovery, use a disposable test and deliberately stop after the durable `executing` marker only if a safe test hook/procedure has been established. Expected: restart enters `recovery_required`, reports an untrusted pose, and refuses further autonomous motion. Do not manufacture this condition by killing Minecraft during a survival-world action merely to pass acceptance.
+1. Confirm both full modem addresses and configure both `/etc/ocia.cfg` files. Verify each configured local address against `component.modem.address`; a mismatch must prevent startup.
+2. With Wheatley at the origin facing North and `robotd.lua` stopped, run `ocia-recover.lua show`, then `ocia-recover.lua reset-origin` and type `RESET`. Record the new epoch and high water `0`.
+3. Start `robotd.lua`. Confirm it reports port 4242 and mode `ready`. Interrupt and restart it once while the port remains open; no port-open assertion may occur.
+4. Run controller `ociactl.lua` with no arguments. Expect `Certainty: succeeded`, `Status: succeeded`, a trusted `(0,0,0)` North pose, the commissioned epoch/high water, healthy journal diagnostics, energy, and memory. Wheatley must not move.
+5. Run `drive.lua`, issue only `status`, exit with `q`, and repeat `ociactl.lua` status. The legacy read-only path must work without disrupting the port or autonomous pose.
+6. In a clear area, run `ociactl.lua left` without `--id`. Record the printed `p:<epoch>:1` identifier. Expect exactly one turn, a successful reply, trusted pose, and high water `1`.
+7. Repeat the exact operation with `ociactl.lua left --id <recorded-id>`. Expect the cached result with `duplicate=true` and no second turn.
+8. Reuse that identifier with `ociactl.lua right --id <recorded-id>`. Expect `rejected / request_id_conflict` and no movement.
+9. Run one clear one-block move without `--id`. Expect the next contiguous sequence, exactly one physical move, one pose transition, and a healthy journal.
+10. Exercise enough safe turns, or use a disposable configuration with the minimum allowed compaction threshold, to observe a generation increase. Restart the daemon and verify high water, pose, and retained duplicate behavior survive compaction. Restore production configuration afterward.
+11. With a safe receive-side harness, suppress one controller reply after a completed physical request. Expect controller certainty `unknown`; retry only the identical identifier and operation. Expect the cached outcome and no second physical action.
+12. Test an interrupted `prepared` record only through a safe hook. On restart, expect definite `failed / interrupted_before_execution`, `physical_outcome=not_started`, trusted unchanged pose, and no Robot API call.
+13. Test an interrupted `executing` record only through a disposable safe hook. On restart, expect `recovery_required`, untrusted unchanged recorded pose, and a matching retry with `physical_outcome_unknown`. Neither matching nor conflicting retries may invoke a Robot API call.
+14. After any legacy physical movement or ambiguous test, manually restore Wheatley to the origin facing North, stop the daemon, inspect with `ocia-recover.lua show`, explicitly commission a new epoch, restart, and confirm status. A saved old-epoch request must then receive `stale_epoch`.
 
-After any manual movement or ambiguous result, physically return Wheatley to the charging origin `(0,0,0)` facing North. Stop the daemon, run `ocia-recover.lua show`, then `ocia-recover.lua reset-origin`, type `RESET`, and restart the daemon. Confirm with status before another movement.
-
-Steps 1–10 are ordinary supervised acceptance. Steps 11–12 require deliberate fault setup and may remain pending until a safe harness is available. Milestone 1 is not complete until the relevant in-game evidence is recorded.
+Steps 1–9 are ordinary supervised acceptance. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until actual results are recorded in `SCRATCH.md` and the relevant `ISSUES.md` acceptance criteria are satisfied.
