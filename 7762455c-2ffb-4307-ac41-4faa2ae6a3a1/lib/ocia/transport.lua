@@ -22,9 +22,15 @@ end
 
 function transport:makeRequest(operation, options)
   options = options or {}
+  local requestId = options.request_id
+  if not requestId and operation == "status" then
+    requestId = "s:" .. self.request_id()
+  elseif not requestId then
+    return nil, "physical operation requires an epoch/sequence request ID"
+  end
   local request = {
     version = protocol.VERSION,
-    request_id = options.request_id or self.request_id(),
+    request_id = requestId,
     deployment_id = options.deployment_id or protocol.NO_DEPLOYMENT,
     recipient = self.config.robot_address,
     operation = operation,

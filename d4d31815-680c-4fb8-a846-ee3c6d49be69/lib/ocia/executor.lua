@@ -26,36 +26,47 @@ function executor.new(options)
     store = options.store,
     perform = options.perform,
     status_provider = options.status_provider or function() return {} end,
-    cache_size = options.cache_size or 64,
-    persistence_available = true
+    recent_limit = options.recent_limit or 32,
+    compact_records = options.compact_records or 128,
+    compact_bytes = options.compact_bytes or 65536
   }, executor)
 
-  local snapshot, metadata = self.store.load()
-  if not snapshot then
-    self.snapshot = state.default()
-    self.snapshot.mode = "recovery_required"
-    self.snapshot.pose = pose.unknown(self.snapshot.pose, "persisted state could not be loaded")
-    self.snapshot.last_error = tostring(metadata)
-    self.persistence_available = false
-    self.boot_error = tostring(metadata)
-    return self
-  end
-
-  self.snapshot = snapshot
-  local changed, classification = state.reconcileAfterLoad(self.snapshot, self.cache_size)
-  if changed then
-    local saved, reason = self.store.save(self.snapshot)
-    if not saved then
-      self.snapshot.mode = "recovery_required"
-      self.snapshot.pose = pose.unknown(self.snapshot.pose, "startup reconciliation could not be persisted")
-      self.snapshot.last_error = tostring(reason)
-      self.persistence_available = false
-      self.boot_error = tostring(reason)
+  self.snapshot, self.load_metadata = self.store.load()
+  if self.snapshot.in_flight then
+    if self.snapshot.in_flight.phase == "prepared"
+        and self.snapshot.journal.health == "healthy" then
+      local item = self.snapshot.in_flight
+      local payload = protocol.encodeFields({
+        code = "interrupted_before_execution",
+        message = "request was prepared but physical execution had not begun"
+      })
+      local appended, reason = self.store.append(self.snapshot, {
+        kind = "completed", sequence = item.sequence,
+        request_id = item.request_id, outcome = "failed", payload = payload,
+        pose_trusted = self.snapshot.pose.trusted,
+        pose_x = self.snapshot.pose.x, pose_y = self.snapshot.pose.y,
+        pose_z = self.snapshot.pose.z, pose_heading = self.snapshot.pose.heading,
+        pose_reason = self.snapshot.pose.reason or ""
+      })
+      if appended then
+        self.boot_classification = "not_started"
+      else
+        self.snapshot.mode = "recovery_required"
+        self.snapshot.pose = pose.unknown(self.snapshot.pose,
+          "prepared-request recovery could not be persisted")
+        self.snapshot.last_error = tostring(reason)
+        self.boot_error = tostring(reason)
+      end
     else
-      self.boot_classification = classification
+      self.snapshot.mode = "recovery_required"
+      self.snapshot.pose = pose.unknown(self.snapshot.pose,
+        "interrupted physical operation")
+      self.snapshot.last_error = "physical operation outcome is ambiguous after restart"
+      self.boot_classification = "ambiguous"
     end
+  elseif self.snapshot.journal.health ~= "healthy" then
+    self.boot_classification = self.snapshot.journal.health
   end
-
   return self
 end
 
@@ -63,216 +74,185 @@ function executor:statusPayload()
   local payload = pose.toFields(self.snapshot.pose)
   payload.mode = self.snapshot.mode
   payload.last_error = self.snapshot.last_error or ""
+  payload.epoch = self.snapshot.epoch or ""
+  payload.high_water = self.snapshot.high_water
+  payload.retained_results = #self.snapshot.recent
+  payload.journal_health = self.snapshot.journal.health
+  payload.journal_generation = self.snapshot.journal.generation
+  payload.journal_records = self.snapshot.journal.records
+  payload.journal_bytes = self.snapshot.journal.bytes
+  payload.last_persist_ms = self.snapshot.journal.last_persist_ms
   if self.snapshot.in_flight then
     payload.in_flight_request = self.snapshot.in_flight.request_id
     payload.in_flight_operation = self.snapshot.in_flight.operation
     payload.in_flight_phase = self.snapshot.in_flight.phase
   end
-  local latest = self.snapshot.completed[#self.snapshot.completed]
+  local latest = self.snapshot.recent[#self.snapshot.recent]
   if latest then
     payload.last_request = latest.request_id
     payload.last_operation = latest.operation
     payload.last_outcome = latest.outcome
   end
-
   local ok, extra = pcall(self.status_provider)
-  if ok and type(extra) == "table" then
-    merge(payload, extra)
-  elseif not ok then
-    payload.status_error = tostring(extra)
-  end
+  if ok and type(extra) == "table" then merge(payload, extra)
+  elseif not ok then payload.status_error = tostring(extra) end
   return payload
 end
 
-function executor:saveOrLock(reason)
-  local saved, saveReason = self.store.save(self.snapshot)
-  if saved then return true end
-  self.persistence_available = false
+function executor:lock(reason, detail)
   self.snapshot.mode = "recovery_required"
   self.snapshot.pose = pose.unknown(self.snapshot.pose, reason)
-  self.snapshot.last_error = tostring(saveReason)
-  return nil, saveReason
+  self.snapshot.last_error = tostring(detail or reason)
+  self.snapshot.journal.health = self.store.health or self.snapshot.journal.health
 end
 
 function executor:completedReply(entry)
   local payload, reason = protocol.decodeFields(entry.payload_raw)
   if not payload then
-    self.snapshot.mode = "recovery_required"
-    self.snapshot.pose = pose.unknown(self.snapshot.pose, "cached result is invalid")
-    self.snapshot.last_error = tostring(reason)
-    return result("recovery_required", "invalid_cached_result", tostring(reason), self:statusPayload())
+    self:lock("cached result is invalid", reason)
+    return result("recovery_required", "invalid_cached_result", tostring(reason),
+      self:statusPayload())
   end
   payload.duplicate = "true"
   return {outcome = entry.outcome, payload = payload}
 end
 
-function executor:recordCompletion(request, outcome, payload)
-  local payloadRaw, encodeReason = protocol.encodeFields(payload)
-  if not payloadRaw then return nil, encodeReason end
-  local added, addReason = state.addCompleted(self.snapshot, {
-    request_id = request.request_id,
-    fingerprint = request.fingerprint,
-    deployment_id = request.deployment_id,
-    operation = request.operation,
-    outcome = outcome,
-    payload_raw = payloadRaw
-  }, self.cache_size)
-  if not added then return nil, addReason end
-  return true
-end
-
 function executor:handle(request)
-  local cached = state.findCompleted(self.snapshot, request.request_id)
-  if cached then
-    if cached.fingerprint ~= request.fingerprint then
-      return result("rejected", "request_id_conflict",
-        "request identifier was already used with different contents")
-    end
-    return self:completedReply(cached)
+  if request.operation == "status" then
+    return result("succeeded", "status", "fresh status returned", self:statusPayload())
   end
 
-  if self.snapshot.in_flight and self.snapshot.in_flight.request_id == request.request_id then
-    if self.snapshot.in_flight.fingerprint ~= request.fingerprint then
-      return result("rejected", "request_id_conflict",
-        "in-flight request identifier has different contents")
-    end
-    return result("recovery_required", "request_in_flight",
-      "request outcome is not safely repeatable", self:statusPayload())
+  local identity, identityReason = protocol.parsePhysicalRequestId(request.request_id)
+  if not identity then return result("rejected", "invalid_request_id", identityReason) end
+  if self.snapshot.epoch == "" then
+    return result("recovery_required", "commissioning_required",
+      "establish the charging origin before autonomous movement", self:statusPayload())
+  end
+  if identity.epoch ~= self.snapshot.epoch then
+    return result("rejected", "stale_epoch",
+      "request belongs to a retired execution epoch", self:statusPayload())
   end
 
-  if #self.snapshot.completed >= self.cache_size then
-    return result("rejected", "result_cache_full",
-      "completed request retention is full; no new request will execute",
+  if identity.sequence <= self.snapshot.high_water then
+    local cached = state.findRecent(self.snapshot, identity.sequence)
+    if cached then
+      if cached.request_id ~= request.request_id or cached.fingerprint ~= request.fingerprint then
+        return result("rejected", "request_id_conflict",
+          "sequence was already used with different request contents")
+      end
+      return self:completedReply(cached)
+    end
+    return result("rejected", "retired_request",
+      "request sequence is completed but its full result has been retired",
       self:statusPayload())
   end
-
-  if request.operation == "status" then
-    local payload = self:statusPayload()
-    payload.code = "status"
-    payload.message = "status returned"
-    local recorded, recordReason = self:recordCompletion(request, "succeeded", payload)
-    if not recorded then
-      return result("rejected", "result_encoding_failed", tostring(recordReason))
-    end
-    local saved, saveReason = self:saveOrLock("status result could not be persisted")
-    if not saved then
-      return result("rejected", "persistence_failed", tostring(saveReason), self:statusPayload())
-    end
-    return {outcome = "succeeded", payload = payload}
+  if identity.sequence ~= self.snapshot.high_water + 1 then
+    return result("rejected", "sequence_gap",
+      "physical requests must be contiguous", self:statusPayload())
   end
-
-  if not self.persistence_available then
-    return result("recovery_required", "persistence_unavailable",
-      "physical execution is disabled because durable state is unavailable", self:statusPayload())
+  if self.snapshot.journal.health ~= "healthy" then
+    return result("recovery_required", "journal_untrusted",
+      "physical execution is disabled because the journal is not authoritative",
+      self:statusPayload())
   end
-  if self.snapshot.mode ~= "ready" then
+  if self.snapshot.mode ~= "ready" or not self.snapshot.pose.trusted then
     return result("recovery_required", "robot_not_ready",
-      "physical execution is disabled until recovery", self:statusPayload())
-  end
-  if not protocol.isPhysical(request.operation) then
-    return result("rejected", "unsupported_operation", "operation is not physical")
+      "physical execution is disabled until pose recovery", self:statusPayload())
   end
 
-  self.snapshot.mode = "in_flight"
-  self.snapshot.in_flight = {
-    request_id = request.request_id,
-    fingerprint = request.fingerprint,
-    deployment_id = request.deployment_id,
-    operation = request.operation,
-    phase = "prepared"
-  }
-  local prepared, prepareReason = self:saveOrLock("prepared intent could not be persisted")
-  if not prepared then
+  local appended, appendReason = self.store.append(self.snapshot, {
+    kind = "prepared", epoch = identity.epoch, sequence = identity.sequence,
+    request_id = request.request_id, fingerprint = request.fingerprint,
+    deployment_id = request.deployment_id, operation = request.operation
+  })
+  if not appended then
+    self:lock("prepared intent could not be persisted", appendReason)
     return result("rejected", "persistence_failed_before_execution",
-      tostring(prepareReason), self:statusPayload())
+      tostring(appendReason), self:statusPayload())
   end
 
-  self.snapshot.in_flight.phase = "executing"
-  local executing, executingReason = self:saveOrLock("execution marker could not be persisted")
-  if not executing then
+  appended, appendReason = self.store.append(self.snapshot, {
+    kind = "executing", sequence = identity.sequence,
+    request_id = request.request_id
+  })
+  if not appended then
+    self:lock("execution marker could not be persisted", appendReason)
     return result("rejected", "persistence_failed_before_execution",
-      tostring(executingReason), self:statusPayload())
+      tostring(appendReason), self:statusPayload())
   end
 
-  local executingSnapshot = state.copy(self.snapshot)
   local callOk, operationOk, detail = pcall(self.perform, request.operation)
   if not callOk then
-    self.snapshot = executingSnapshot
-    self.snapshot.mode = "recovery_required"
-    self.snapshot.pose = pose.unknown(self.snapshot.pose, "operation raised an exception")
-    self.snapshot.last_error = tostring(operationOk)
-    self.store.save(self.snapshot)
+    self:lock("operation raised an exception", operationOk)
     return result("recovery_required", "operation_exception",
       tostring(operationOk), self:statusPayload())
   end
 
-  local outcome
-  local code
-  local message
+  local resultingPose = pose.copy(self.snapshot.pose)
+  local outcome, code, message
   if operationOk then
     local nextPose, poseReason = pose.apply(self.snapshot.pose, request.operation)
     if not nextPose then
-      self.snapshot = executingSnapshot
-      self.snapshot.mode = "recovery_required"
-      self.snapshot.pose = pose.unknown(self.snapshot.pose, "pose transition failed")
-      self.snapshot.last_error = tostring(poseReason)
-      self.store.save(self.snapshot)
+      self:lock("pose transition failed", poseReason)
       return result("recovery_required", "pose_transition_failed",
         tostring(poseReason), self:statusPayload())
     end
-    self.snapshot.pose = nextPose
-    outcome = "succeeded"
-    code = "operation_succeeded"
-    message = tostring(detail or "OK")
+    resultingPose = nextPose
+    outcome, code, message = "succeeded", "operation_succeeded", tostring(detail or "OK")
   else
-    outcome = "failed"
-    code = "operation_failed"
-    message = tostring(detail or "blocked")
+    outcome, code, message = "failed", "operation_failed", tostring(detail or "blocked")
   end
 
-  self.snapshot.mode = "ready"
-  self.snapshot.in_flight = nil
-  self.snapshot.last_error = ""
-  local payload = self:statusPayload()
+  local payload = pose.toFields(resultingPose)
+  payload.mode = "ready"
   payload.code = code
   payload.message = message
-
-  local recorded, recordReason = self:recordCompletion(request, outcome, payload)
-  if not recorded then
-    self.snapshot = executingSnapshot
-    self.snapshot.mode = "recovery_required"
-    self.snapshot.pose = pose.unknown(self.snapshot.pose, "operation result could not be encoded")
-    self.snapshot.last_error = tostring(recordReason)
-    self.store.save(self.snapshot)
+  local statusOk, extra = pcall(self.status_provider)
+  if statusOk and type(extra) == "table" then merge(payload, extra) end
+  local payloadRaw, encodeReason = protocol.encodeFields(payload)
+  if not payloadRaw then
+    self:lock("operation result could not be encoded", encodeReason)
     return result("recovery_required", "result_encoding_failed",
-      tostring(recordReason), self:statusPayload())
+      tostring(encodeReason), self:statusPayload())
   end
 
-  local saved, saveReason = self.store.save(self.snapshot)
-  if not saved then
-    self.snapshot = executingSnapshot
-    self.snapshot.mode = "recovery_required"
-    self.snapshot.pose = pose.unknown(self.snapshot.pose, "operation result could not be persisted")
-    self.snapshot.last_error = tostring(saveReason)
-    self.persistence_available = false
+  appended, appendReason = self.store.append(self.snapshot, {
+    kind = "completed", sequence = identity.sequence,
+    request_id = request.request_id, outcome = outcome, payload = payloadRaw,
+    pose_trusted = resultingPose.trusted,
+    pose_x = resultingPose.x, pose_y = resultingPose.y, pose_z = resultingPose.z,
+    pose_heading = resultingPose.heading, pose_reason = resultingPose.reason or ""
+  })
+  if not appended then
+    self:lock("operation completion could not be persisted", appendReason)
     return result("recovery_required", "completion_persistence_failed",
-      tostring(saveReason), self:statusPayload())
+      tostring(appendReason), self:statusPayload())
   end
 
+  if self.snapshot.journal.records >= self.compact_records
+      or self.snapshot.journal.bytes >= self.compact_bytes then
+    local compacted, compactReason = self.store.compact(self.snapshot)
+    if not compacted then
+      self:lock("journal compaction was interrupted", compactReason)
+      return result("recovery_required", "compaction_failed",
+        tostring(compactReason), self:statusPayload())
+    end
+  end
   return {outcome = outcome, payload = payload}
 end
 
 function executor:beginManualRecovery()
-  self.snapshot.mode = "recovery_required"
-  self.snapshot.pose = pose.unknown(self.snapshot.pose, "legacy manual movement")
-  self.snapshot.last_error = "legacy manual movement invalidated autonomous pose"
-  local saved, reason = self.store.save(self.snapshot)
-  if not saved then
-    self.persistence_available = false
-    return nil, reason
+  if self.snapshot.journal.health == "healthy" then
+    local appended, reason = self.store.append(self.snapshot, {kind = "manual"})
+    if not appended then
+      self:lock("manual recovery marker could not be persisted", reason)
+      return nil, reason
+    end
+  else
+    self.snapshot.mode = "recovery_required"
+    self.snapshot.pose = pose.unknown(self.snapshot.pose, "legacy manual movement")
   end
   return true
 end
 
 return executor
-

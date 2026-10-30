@@ -31,10 +31,14 @@ local actions = {
   move_down = robot.down
 }
 
-local store = state.fileStore(config.state_path)
+local store = state.journalStore(config.state_path, {
+  recent_limit = config.recent_results
+})
 local commandExecutor = executorModule.new({
   store = store,
-  cache_size = config.cache_size,
+  recent_limit = config.recent_results,
+  compact_records = config.compact_records,
+  compact_bytes = config.compact_bytes,
   perform = function(operation)
     local action = actions[operation]
     if not action then return false, "unsupported physical operation" end
@@ -43,7 +47,9 @@ local commandExecutor = executorModule.new({
   status_provider = function()
     return {
       energy = math.floor(computer.energy()),
-      capacity = math.floor(computer.maxEnergy())
+      capacity = math.floor(computer.maxEnergy()),
+      total_memory = computer.totalMemory(),
+      free_memory = computer.freeMemory()
     }
   end
 })

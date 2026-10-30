@@ -6,7 +6,9 @@ local defaults = {
   port = 4242,
   protocol_version = protocol.VERSION,
   timeout = 8,
-  cache_size = 256,
+  recent_results = 32,
+  compact_records = 128,
+  compact_bytes = 65536,
   legacy_enabled = true,
   state_path = "/var/lib/ocia/robot.state"
 }
@@ -53,7 +55,9 @@ function config.parse(text)
   result.port = tonumber(result.port)
   result.protocol_version = tonumber(result.protocol_version)
   result.timeout = tonumber(result.timeout)
-  result.cache_size = tonumber(result.cache_size)
+  result.recent_results = tonumber(result.recent_results)
+  result.compact_records = tonumber(result.compact_records)
+  result.compact_bytes = tonumber(result.compact_bytes)
   if type(result.legacy_enabled) == "string" then
     result.legacy_enabled = parseBoolean(result.legacy_enabled)
   end
@@ -80,9 +84,20 @@ function config.validate(values, role)
   if type(values.timeout) ~= "number" or values.timeout <= 0 or values.timeout > 120 then
     return nil, "timeout must be greater than zero and at most 120 seconds"
   end
-  if type(values.cache_size) ~= "number" or values.cache_size ~= math.floor(values.cache_size)
-      or values.cache_size < 1 or values.cache_size > 256 then
-    return nil, "cache_size must be an integer from 1 through 256"
+  if type(values.recent_results) ~= "number"
+      or values.recent_results ~= math.floor(values.recent_results)
+      or values.recent_results < 1 or values.recent_results > 64 then
+    return nil, "recent_results must be an integer from 1 through 64"
+  end
+  if type(values.compact_records) ~= "number"
+      or values.compact_records ~= math.floor(values.compact_records)
+      or values.compact_records < 16 or values.compact_records > 1024 then
+    return nil, "compact_records must be an integer from 16 through 1024"
+  end
+  if type(values.compact_bytes) ~= "number"
+      or values.compact_bytes ~= math.floor(values.compact_bytes)
+      or values.compact_bytes < 8192 or values.compact_bytes > 262144 then
+    return nil, "compact_bytes must be an integer from 8192 through 262144"
   end
   if type(values.legacy_enabled) ~= "boolean" then
     return nil, "legacy_enabled must be true or false"

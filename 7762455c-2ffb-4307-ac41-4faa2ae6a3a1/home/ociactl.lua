@@ -78,6 +78,25 @@ local client = transportModule.new({
   request_id = uuid.next
 })
 
+if protocol.isPhysical(operation) and not requestId then
+  local status = client:sendRequest("status")
+  if status.certainty ~= "succeeded" or not status.payload
+      or status.payload.pose_trusted ~= "true" or status.payload.mode ~= "ready"
+      or not status.payload.epoch or status.payload.epoch == "" then
+    if openedHere then modem.close(config.port) end
+    io.stderr:write("Cannot allocate a physical request: Wheatley is not commissioned and ready.\n")
+    os.exit(1)
+  end
+  local nextSequence = tonumber(status.payload.high_water)
+  if not nextSequence then
+    if openedHere then modem.close(config.port) end
+    io.stderr:write("Cannot allocate a physical request: invalid high-water status.\n")
+    os.exit(1)
+  end
+  requestId = assert(protocol.makePhysicalRequestId(status.payload.epoch, nextSequence + 1))
+end
+
+if requestId then print("Sending request: " .. requestId) end
 local response = client:sendRequest(operation, {
   request_id = requestId,
   deployment_id = deploymentId
@@ -112,6 +131,22 @@ if response.payload then
   end
   if response.payload.energy then
     print("Energy: " .. tostring(response.payload.energy) .. "/" .. tostring(response.payload.capacity))
+  end
+  if response.payload.total_memory then
+    print("Memory free/total: " .. tostring(response.payload.free_memory)
+      .. "/" .. tostring(response.payload.total_memory))
+  end
+  if response.payload.epoch then
+    print("Epoch/high water: " .. tostring(response.payload.epoch)
+      .. "/" .. tostring(response.payload.high_water))
+  end
+  if response.payload.journal_health then
+    print("Journal: " .. tostring(response.payload.journal_health)
+      .. "; generation " .. tostring(response.payload.journal_generation)
+      .. "; records " .. tostring(response.payload.journal_records)
+      .. "; bytes " .. tostring(response.payload.journal_bytes)
+      .. "; last write " .. tostring(response.payload.last_persist_ms) .. " ms")
+    print("Retained physical results: " .. tostring(response.payload.retained_results))
   end
   if response.payload.duplicate == "true" then print("Duplicate request: cached result returned") end
 end

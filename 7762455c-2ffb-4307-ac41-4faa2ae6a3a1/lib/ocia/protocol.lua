@@ -52,24 +52,12 @@ function protocol.unescape(value)
   if type(value) ~= "string" then
     return nil, "encoded value must be a string"
   end
-
-  local result = {}
-  local index = 1
-  while index <= #value do
-    local character = value:sub(index, index)
-    if character == "%" then
-      local hex = value:sub(index + 1, index + 2)
-      if #hex ~= 2 or not hex:match("^%x%x$") then
-        return nil, "invalid percent escape"
-      end
-      result[#result + 1] = string.char(tonumber(hex, 16))
-      index = index + 3
-    else
-      result[#result + 1] = character
-      index = index + 1
-    end
+  if value:gsub("%%%x%x", ""):find("%", 1, true) then
+    return nil, "invalid percent escape"
   end
-  return table.concat(result)
+  return (value:gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end))
 end
 
 function protocol.encodeFields(fields)
@@ -145,6 +133,43 @@ function protocol.isPhysical(operation)
   return definition and definition.physical or false
 end
 
+function protocol.parsePhysicalRequestId(requestId)
+  if type(requestId) ~= "string" then return nil, "request ID must be a string" end
+  local epoch, sequenceText = requestId:match("^p:([%x%-]+):(%d+)$")
+  if not epoch or #epoch < 8 or #epoch > 48 then
+    return nil, "physical request ID must contain a valid execution epoch"
+  end
+  local sequence = tonumber(sequenceText)
+  if not sequence or sequence < 1 or sequence ~= math.floor(sequence)
+      or sequence > 9007199254740991 then
+    return nil, "physical request sequence is invalid"
+  end
+  return {epoch = epoch, sequence = sequence}
+end
+
+function protocol.makePhysicalRequestId(epoch, sequence)
+  local value = "p:" .. tostring(epoch) .. ":" .. tostring(sequence)
+  local parsed, reason = protocol.parsePhysicalRequestId(value)
+  if not parsed then return nil, reason end
+  return value
+end
+
+function protocol.validStatusRequestId(requestId)
+  return validToken(requestId, 64) and requestId:match("^s:[%w%._:%-]+$") ~= nil
+end
+
+local function validateRequestIdentity(requestId, operation)
+  if operation == "status" then
+    if not protocol.validStatusRequestId(requestId) then
+      return nil, "status request ID must use the s: namespace"
+    end
+  else
+    local parsed, reason = protocol.parsePhysicalRequestId(requestId)
+    if not parsed then return nil, reason end
+  end
+  return true
+end
+
 function protocol.fingerprint(request)
   return table.concat({
     tostring(request.version),
@@ -209,6 +234,10 @@ function protocol.parseRequest(parts, localAddress)
   end
   if type(parts[7]) ~= "string" or not protocol.operations[parts[7]] then
     return nil, "unsupported_operation", "operation is not supported"
+  end
+  local identityOk, identityReason = validateRequestIdentity(parts[4], parts[7])
+  if not identityOk then
+    return nil, "invalid_request_id", identityReason
   end
   local arguments, reason = protocol.decodeFields(parts[8])
   if not arguments then
@@ -283,6 +312,10 @@ function protocol.parseReply(parts)
   end
   if type(parts[6]) ~= "string" or not protocol.operations[parts[6]] then
     return nil, "unsupported_operation", "reply operation is not supported"
+  end
+  local identityOk, identityReason = validateRequestIdentity(parts[4], parts[6])
+  if not identityOk then
+    return nil, "invalid_request_id", identityReason
   end
   if not protocol.outcomes[parts[7]] then
     return nil, "invalid_outcome", "reply outcome is not supported"
