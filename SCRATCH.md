@@ -2,7 +2,7 @@
 
 This file contains current planning, progress, decisions under consideration, and handoff context. It is intentionally stateful and may be rewritten as the project evolves.
 
-The evergreen project purpose, architecture, and engineering constraints are defined in [CODEX.md](CODEX.md). Known defects and risks are tracked by stable identifiers in [ISSUES.md](ISSUES.md). Do not duplicate durable design rules here when they belong in `CODEX.md`, and do not close a risk here without updating `ISSUES.md`.
+The evergreen project purpose, architecture, and engineering constraints are defined in [CODEX.md](CODEX.md). Known defects and risks are tracked by stable identifiers in [ISSUES.md](ISSUES.md). The milestone dependency tree, module boundaries, survey design, recovery matrix, and farm implementation path are maintained in [MVP_PLAN.md](MVP_PLAN.md). Do not duplicate durable design rules here when they belong in `CODEX.md`, and do not close a risk here without updating `ISSUES.md`.
 
 ## Current State
 
@@ -14,6 +14,7 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Robot program: `home/robotd.lua`
 - Wireless port: `4242`
 - No construction, blueprint, pose, persistence, or Refined Storage orchestration code has been implemented.
+- Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
 - `CODEX.md`, `ISSUES.md`, and this roadmap are the first repository documentation added during the current work.
@@ -55,19 +56,38 @@ The stationary controller is built, boots successfully, and contains:
 - Keyboard.
 - External disk drive.
 
-The construction robot is built through the Electronics Assembler, boots successfully, and contains:
+The construction robot is named **Wheatley**. He has been rebuilt through the Electronics Assembler, boots successfully, and currently contains:
 
 - Tier 2 APU.
 - Two Tier 2 memory modules.
-- Tier 2 HDD with OpenOS.
+- Tier 2 2 MB HDD with OpenOS.
 - Lua BIOS EEPROM.
 - Tier 1 screen.
 - Keyboard.
 - Tier 2 Wireless Network Card.
 - Inventory Upgrade.
+- Inventory Controller Upgrade.
+- Geolyzer.
+- Tier 2 Battery Upgrade.
 - Internal disk drive.
 
-The robot can be disassembled with the OpenComputers Disassembler, but disassembly and reassembly are expensive and inconvenient. Confirm that an additional hardware upgrade is actually required and fits the Tier 2 complexity/component limits before recommending a rebuild.
+The former separate Tier 1 Graphics Card was removed because the Tier 2 APU already supplies GPU functionality. Wheatley booted normally with working screen and keyboard, and this probe succeeded:
+
+```lua
+c = require("component")
+print("GPU:", c.isAvailable("gpu"))
+-- GPU: true
+
+print("Geolyzer:", c.isAvailable("geolyzer"))
+-- Geolyzer: true
+
+print("Inventory Controller:", c.isAvailable("inventory_controller"))
+-- Inventory Controller: true
+```
+
+Do not restore the redundant Graphics Card to the required configuration. The robot can be disassembled with the OpenComputers Disassembler, but disassembly and reassembly are expensive and inconvenient. The current configuration proves that the Geolyzer, Inventory Controller, and Tier 2 Battery fit and boot together; additional upgrades still require a demonstrated need and capacity check.
+
+Component discovery does not prove method behavior. Battery capacity/endurance, scan and excavation energy cost, Inventory Controller inspection, `equip()`, automatic tool swapping, loading/unloading, sustained navigation, and autonomous charging return remain unverified unless recorded below.
 
 The charging station now has verified hardware:
 
@@ -76,6 +96,31 @@ The charging station now has verified hardware:
 - Lever supplying the Charger's activation signal.
 
 In-game testing showed that adjacency and conduit power were insufficient while the Charger lacked redstone. After a Lever was installed and activated, the Charger restored enough Robot energy for it to boot normally. This verifies stationary charging and the normal-mode redstone requirement, not autonomous docking, alignment, charge detection, target-level waiting, or deployment resume.
+
+### Wheatley's depot
+
+Wheatley's observed resting pose is outdoors beside the factory wall, facing North:
+
+```text
+                     North (-Z)
+                         |
+                    [ Charger ]
+                         |
+West (-X)           [ Wheatley ]           East (+X)
+open space                                  factory wall
+                         |
+                  [ Ender Chest ]
+                         |
+                     South (+Z)
+```
+
+- The Charger is directly in front of Wheatley and has the activating Lever.
+- The existing EnderStorage chest is directly behind him.
+- The factory wall is directly east; west is open.
+- Grass Blocks are beneath the robot.
+- The wall uses Chiseled Stone or factory-style blocks.
+
+This asymmetric geometry is a useful fixed fixture for calibrating Geolyzer array order, axes, heading behavior, and density readings. It also means Wheatley must rotate or use a verified side interaction before loading from the chest behind him.
 
 ### Working remote control
 
@@ -95,19 +140,131 @@ The controller originally asserted an unconditional `modem.open(4242)`, which fa
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
 
-### Survey capability research
+### OpenOS REPL behavior
 
-The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` and its bundled English manual establish these API boundaries. They have not yet been exercised by this robot in-game:
+The OpenOS `lua` interpreter is useful for small probes but has two confirmed pitfalls:
 
-- `robot.detect()`, `detectUp()`, and `detectDown()` examine only the adjacent space and return occupancy plus a broad category such as `entity`, `solid`, `replaceable`, `liquid`, or `air`.
-- `robot.compare()`, `compareUp()`, and `compareDown()` compare an adjacent block with the selected inventory item. They do not return arbitrary block identity.
-- No general `robot.inspect*` method appears in the installed 1.8.8 Robot library.
-- The Inventory Controller Upgrade provides detailed item-stack and external-inventory inspection, targeted inventory transfer, and `equip()` for tool swapping. It is not a terrain scanner.
-- A Geolyzer can be installed in a robot. Its documented component methods include `scan(...)`, which reports approximate noisy density or hardness for a bounded volume, and `analyze(side[, options])`, which reports information about one directly adjacent block.
-- Installed callback documentation records `scan(x, z[, y, w, d, h][, ignoreReplaceable|options])` and `analyze(side[, options])`. Exact return tables, range under this configuration, energy use, noise behavior, and modded-block data still require in-game probes.
-- `allowItemStackInspection=true` is enabled; installed bytecode gates Geolyzer `analyze()` behind that setting. Its actual returned block fields still need to be recorded in-game.
+- A variable declared with `local` in one submitted statement is not available in a later statement. Use a persistent global such as `c = require("component")` for multi-command exploration.
+- Pasting a multiline program as one interactive block can produce a stack trace and `end` syntax error because the REPL does not treat the paste as one complete source chunk.
 
-A Geolyzer may materially improve surface mapping and clearance discovery, but density scans do not establish registry identity. Blocks that are neither adjacent nor safely reachable may remain estimates or unknowns. Do not rebuild the robot for a Geolyzer until its value, required slot, and compatibility with the current Tier 2 assembly are established.
+Individual statements and single-line loops work reliably. Maintain real programs as `.lua` files from the Ubuntu host rather than pasting substantial code into the REPL.
+
+### Verified Geolyzer behavior
+
+The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` establishes the base API boundary: `robot.detect*` returns adjacent occupancy categories, `robot.compare*` requires a selected sample, no general `robot.inspect*` exists, and the Inventory Controller inspects items rather than terrain. Wheatley's installed Geolyzer now provides demonstrated detailed adjacent analysis and volume scanning.
+
+Persistent REPL setup:
+
+```lua
+c = require("component")
+g = c.geolyzer
+sides = require("sides")
+ser = require("serialization")
+```
+
+The block beneath Wheatley was analyzed with:
+
+```lua
+print(ser.serialize(g.analyze(sides.down)))
+```
+
+Actual result:
+
+```lua
+{
+  color = 8368696,
+  harvestTool = "shovel",
+  harvestLevel = 0,
+  metadata = 0,
+  properties = {snowy = false},
+  hardness = 0.60000002384186,
+  name = "minecraft:grass"
+}
+```
+
+This positively identified the adjacent Minecraft 1.12.2 Grass Block; `minecraft:grass` is not tall grass. The demonstrated result includes registry identity, metadata, properties, hardness, harvesting tool and level, and color. `analyze()` remains adjacent-only.
+
+The tested scan signature was `g.scan(x, z, y, width, depth, height)`. Its `x, z, y` order is intentionally recorded because it is easy to misread as conventional `x, y, z`.
+
+Ground layer at `Y=-1`:
+
+```lua
+scan = g.scan(-1,-1,-1,3,3,1)
+```
+
+```text
+ 0.57   0.55   1.46
+ 0.57   0.65   1.44
+ 0.64   0.58   1.40
+```
+
+The western and center measurements are consistent with the known Grass Block hardness. The eastern column is consistent with the known factory wall. Only the center block was positively identified by `analyze()`.
+
+Upper layer at `Y=+1`:
+
+```lua
+upper = g.scan(-1,-1,1,3,3,1)
+```
+
+```text
+ 0.00   0.54   1.56
+ 0.00   0.00   1.44
+ 0.00   0.00   1.47
+```
+
+The zeros correlate with known open space, and the eastern column correlates with the wall. The northern center value may be the Lever or Charger assembly, but that identity is speculative. A zero scan value is not proof of air.
+
+Middle layer at `Y=0`:
+
+```lua
+middle = g.scan(-1,-1,0,3,3,1)
+```
+
+```text
+ 0.00    2.04    1.55
+ 0.00    2.00    1.55
+ 0.00   19.99    1.46
+```
+
+While Wheatley faced North, this correlated with the known depot geometry:
+
+```text
+                 West       Center        East
+North            0.00        2.04         1.55
+                             Charger      wall
+Center           0.00        2.00         1.55
+                             Wheatley     wall
+South            0.00       19.99         1.46
+                             Ender Chest  wall
+```
+
+The labels come from known physical geometry, not from `scan()` itself. Scan array order and whether axes rotate with robot heading remain unverified.
+
+A repeated unchanged middle-layer scan produced these deltas from the first result:
+
+```text
+1    0.000
+2   -0.087
+3   -0.046
+4    0.000
+5    0.000
+6   -0.034
+7    0.000
+8    0.045
+9    0.041
+```
+
+The four zero cells remained zero. Solid readings varied slightly, with a largest observed absolute difference of `0.087` in this one experiment. This is evidence of scan noise, not a universal maximum or a production tolerance.
+
+The survey model therefore retains these distinct evidence types:
+
+1. Positive identity from adjacent `analyze()`.
+2. Comparison with a known carried sample.
+3. Categorical adjacent detection.
+4. Approximate density or hardness from `scan()`.
+5. Unknown or insufficiently characterized state.
+
+Volume scans are demonstrated and useful for a preliminary three-dimensional model. They do not convert a value near `1.5` into `minecraft:stone`, and zero does not automatically mean air. Production use still requires heading/axis calibration, more noise samples, energy measurements, zero-value tests, and scan behavior for liquids, foliage, entities, and modded blocks.
 
 ### Confirmed native Refined Storage integration
 
@@ -193,6 +350,30 @@ Only `isConnected()` and `getItems()` have been exercised successfully. Individu
 
 The OpenOS REPL produced a stack trace and `end` syntax error when a multiline program was pasted as one block. Individual statements using persistent globals worked. Prefer host-maintained `.lua` probes over multiline REPL pastes.
 
+### Proposed dock supply and return flow
+
+The preferred material path keeps the controller, OC Adapter, and RS Interface inside the factory while using EnderStorage to bridge the wall:
+
+```text
+RS Interface -> inside supply staging -> supply Ender Chest
+    == shared EnderStorage inventory ==
+outside dock Ender Chest -> Wheatley
+```
+
+This topology is proposed, not validated. The existing Ender Chest is directly south of Wheatley's resting pose, so the loading procedure must include a verified rotation or side interaction.
+
+A separate EnderStorage color frequency is preferred for returns:
+
+```text
+Wheatley -> outside return Ender Chest
+    == separate EnderStorage inventory ==
+inside return Ender Chest -> RS Importer -> RS network
+```
+
+Separating supply and return prevents an RS Importer from immediately reclaiming newly staged supplies. Neither channel may conflict with the white/white/blue frequency reserved for finished farm output.
+
+The first dock experiment should use one expendable item and record every inventory delta. Inventory Controller side and slot behavior, chest access from the resting pose, RS extraction into the inside chest, return Importer behavior, and whether one or two physical dock chests are simplest remain open.
+
 ### Superseded Dead Bush workflow
 
 The Dead Bush MacGuffin processing-pattern cycle was manually tested successfully: 64 Dirt was staged as input, a reusable Dead Bush was declared as output and kept in staging by an Exporter, and returning it through an Interface completed the pending job. A pattern consuming and producing the same token was rejected as circular.
@@ -206,6 +387,7 @@ The following values still need to be recorded when required by implementation:
 - Controller modem address.
 - Robot modem address.
 - Robot-accessible staging and return inventory locations plus remaining component addresses.
+- Supply, return, and farm-output EnderStorage color frequencies and final dock chest layout.
 - Deployment origins, headings, and site coordinates.
 - Initial controller-side deployment submission interface.
 
@@ -228,9 +410,11 @@ These choices are proposed for the first implementation and should be revised he
 - Carry nine consumable dirt blocks plus one reserved dirt comparison block for exact verification.
 - Keep the controller authoritative for deployment state; use native RS integration only as an inventory and autocrafting service.
 - Treat blueprint data as desired state, a read-only survey as observed state, and the controller-generated diff as the inspectable plan.
+- Preserve raw Geolyzer samples separately from interpreted observations and plans; never promote scan density to block identity.
 - Survey and produce a deterministic terrain plan before calculating the bill of materials; do not let the initial survey modify blocks.
 - Revalidate plan preconditions before apply, then resurvey after apply to prove convergence or report remaining differences.
 - Allow staged extraction, multiple supply trips, recovered-material credit, and explicit reconciliation after the plan establishes requirements.
+- Validate the proposed EnderStorage supply and separate return channels one item at a time before adopting them for manifests.
 - Continue validating the standalone 3x3 control loop before coupling physical construction to automated provisioning.
 
 ## Potato Farm MVP Requirements
@@ -309,7 +493,7 @@ DDDDDDDDD
 - Building materials, machine blocks, the Tier 4 Range Addon, water bucket, exactly 80 Potatoes, and stone tools are provisioned from Refined Storage after the controller computes the survey-derived requirements.
 - Reusable, recovered, or residual items, including the empty bucket, return to Refined Storage through a verified insertion workflow.
 - The user intends automatic tool switching and replacement stone tools.
-- The robot already has an Inventory Upgrade. The user is adding an Inventory Controller Upgrade for automatic equipped-tool swapping.
+- Wheatley has both an Inventory Upgrade and Inventory Controller Upgrade. Automatic equipped-tool swapping still requires an operational `equip()` test.
 - The robot will not craft tools. The controller should request finished replacement tools through RS and make them physically available to the robot.
 - Earlier source investigation suggests that the Interface exposes an 18-slot external inventory with import/return and stocked-export regions, but the robot-side slot and side mapping is not verified. Native extraction to a dedicated adjacent staging chest may avoid depending on those provider slots; test both loading and return paths before choosing one.
 
@@ -442,8 +626,8 @@ Related risks: OCIA-025, OCIA-026, OCIA-027, OCIA-028, OCIA-030.
 
 Goal: observe a representative uneven 9x10 site and compute the desired-versus-observed terrain diff without modifying any block.
 
-- Probe `robot.detect*`, `robot.compare*`, Inventory Controller inspection, and Geolyzer `scan`/`analyze` behavior against the installed version.
-- Decide whether the Geolyzer is necessary and fits the existing Tier 2 robot before any rebuild.
+- Complete representative `robot.detect*` and `robot.compare*` probes, Inventory Controller inspection tests, and Geolyzer calibration against the installed version.
+- Calibrate Geolyzer flat-array order, local axes, heading rotation, repeatability, zero readings, and energy cost using the known depot geometry.
 - Define a coordinate-indexed survey record with explicit observation kinds such as identified, compared, detected category, density estimate, and unknown.
 - Record surface elevation, accessible material identity, trees and foliage, holes and unsupported terrain, elevated terrain, replacement surfaces, crop/machinery clearance, and five-block-limit failures.
 - Preserve raw observations separately from controller-derived conclusions.
@@ -476,7 +660,8 @@ Goal: compute and fulfill a dynamic manifest from an accepted plan without coupl
 - Track stored, craftable, allocated, loaded, recovered, consumed, returned, missing, and unexplained quantities separately.
 - Reserve resources for one active deployment and detect changes between inventory query, crafting, and extraction.
 - Stage verified quantities in a dedicated accessible inventory and support partial fulfillment and multiple resupply trips.
-- Choose and verify the robot loading path, including the Inventory Controller Upgrade and tool switching.
+- Validate the proposed inside-to-outside EnderStorage supply channel and a separate return channel before selecting the final dock inventory layout.
+- Verify the robot loading path, including chest side/slot mapping, the Inventory Controller Upgrade, and tool switching.
 - Return the empty bucket, recovered blocks, unused supplies, and worn tools through the tested insertion path.
 - Journal inventory mutations so restart ambiguity leads to reconciliation rather than blind replay.
 - Record accounting completion separately from `balanced`, `discrepant`, or explicitly accepted discrepancy outcomes.
@@ -529,7 +714,7 @@ Related risks: OCIA-019, OCIA-021.
 
 ## Immediate Next Work
 
-The next software implementation session should continue with Phase 1 while preserving the committed repository baseline:
+The next software implementation session should implement Milestone 1 in [MVP_PLAN.md](MVP_PLAN.md) while preserving the working manual driver:
 
 1. Define protocol version 1 and configuration files.
 2. Add tests for the pure protocol logic.
@@ -539,13 +724,17 @@ The next software implementation session should continue with Phase 1 while pres
 
 The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
-Before implementing the terrain survey, run small supervised API probes in a disposable test area:
+The next Wheatley hardware session should run small supervised probes at the dock or in a disposable test area:
 
-1. Record `robot.detect*` results for air, Dirt, Stone, foliage, liquid, and an entity where safe.
-2. Record `robot.compare*` behavior with matching and nonmatching block samples.
-3. Install or test a Geolyzer only after confirming assembly capacity; record `scan` and `analyze` return tables, range, noise, energy cost, and modded-block behavior.
-4. Determine which 9x10 observations are positive identifications, comparisons, categories, density estimates, or unavoidable unknowns.
-5. Run the first complete survey-and-plan acceptance test with world-changing operations disabled.
+1. Enumerate Inventory Controller methods and record internal and external inventory results.
+2. Equip and restore one inexpensive tool, recording slots and equipped-state evidence.
+3. Record `robot.detect*` and `robot.compare*` behavior for representative safe targets.
+4. Repeat the depot scan while facing all four headings to establish Geolyzer array order and rotation behavior.
+5. Record scan/analyze energy cost, additional noise samples, zero-value behavior, and selected modded-block results.
+6. Characterize the Tier 2 Battery through observed `computer.maxEnergy()` and operation endurance.
+7. Load and return one expendable item through the dock Ender Chest before designing manifest transfers.
+8. Determine which 9x10 observations are positive identifications, comparisons, categories, density estimates, or unavoidable unknowns.
+9. Run the first complete survey-and-plan acceptance test with world-changing operations disabled.
 
 For charging, measure robot energy at the expected charging pose with the Lever on and off. Establish the observation interval and minimum positive energy delta that will prove charging without confusing ordinary energy use or a full buffer with failure.
 
@@ -555,10 +744,10 @@ For charging, measure robot energy at the expected charging pose with the Lever 
 - The controller-side port-open guard is present and known to work.
 - The same guard is absent from the robot daemon.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
-- Detailed item-stack inspection does require an Inventory Controller Upgrade.
+- Detailed item-stack inspection requires the now-installed Inventory Controller Upgrade; its operational methods remain untested.
 - The Inventory Controller Upgrade does not identify terrain blocks.
-- Installed 1.8.8 code exposes no general `robot.inspect*`; detailed adjacent block analysis belongs to the optional Geolyzer.
-- Geolyzer density scans are noisy estimates; `analyze` is limited to a directly adjacent block.
+- Installed 1.8.8 code exposes no general `robot.inspect*`; detailed adjacent block analysis belongs to Wheatley's installed Geolyzer.
+- Geolyzer density scans and adjacent analysis are demonstrated, but coordinate mapping and production thresholds are not.
 - Ordinary robot placement requires a supporting surface unless Angel placement is available.
 - The verified Charger requires redstone activation in normal mode; autonomous docking and positive charging verification remain untested.
 - OpenComputers defaults permit at most eight packet data parts and 8192 bytes per packet; keep messages compact.

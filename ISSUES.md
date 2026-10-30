@@ -108,8 +108,8 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Inventory
 - **Risk:** The controller can identify RS inventory, but the robot cannot yet prove which carried item or tool is in a slot during physical execution.
-- **Current evidence:** Native RS `getItems()` has distinguished registry IDs and metadata successfully. The robot has an Inventory Upgrade; an Inventory Controller Upgrade is planned but not yet validated. The farm requires switching among several equipped tools.
-- **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Before terrain preparation, install and validate an Inventory Controller Upgrade or adopt a workflow that does not require automatic tool swapping.
+- **Current evidence:** Native RS `getItems()` has distinguished registry IDs and metadata successfully. Wheatley now boots with both an Inventory Upgrade and recognized `inventory_controller` component, but detailed internal/external slot inspection has not been exercised. The farm requires switching among several equipped tools.
+- **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Probe Inventory Controller stack descriptions and slot behavior before terrain preparation, then validate every loaded material against the manifest.
 - **Resolution criteria:** The prototype detects incorrect material before reporting success, and the robot can identify required materials and select every required tool safely.
 
 ### OCIA-012: Placement can fail without a supporting surface
@@ -135,9 +135,9 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Power management
 - **Risk:** A deployment may begin with insufficient energy and stop away from its recovery location.
-- **Current evidence:** Energy is reported but not used as an execution precondition. A conduit-powered OpenComputers Charger has restored the Robot successfully after a Lever supplied the required redstone activation signal.
-- **Required mitigation:** Establish conservative preflight and reserve thresholds, budget survey/apply/return energy separately, and enter recovery before the reserve is exhausted. Charging-station verification is tracked by OCIA-035.
-- **Resolution criteria:** Deployment is refused below the configured reserve, tested plans account for return energy, and low-energy execution stops while the robot can still reach or be recovered at the station.
+- **Current evidence:** Energy is reported but not used as an execution precondition. A conduit-powered OpenComputers Charger has restored Wheatley successfully after a Lever supplied the required redstone activation signal. A Tier 2 Battery Upgrade is installed and boots, but its observed capacity and endurance have not been characterized.
+- **Required mitigation:** Measure idle, movement, analyze, scan, excavation, and return energy costs; establish conservative preflight and reserve thresholds; and enter recovery before the reserve is exhausted. Charging-station verification is tracked by OCIA-035.
+- **Resolution criteria:** The Battery's observed buffer is recorded, deployment is refused below the configured reserve, tested plans account for return energy, and low-energy execution stops while Wheatley can still reach or be recovered at the station.
 
 ### OCIA-015: Chunk unloading can interrupt unattended deployment
 
@@ -184,13 +184,13 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Test the installed Plant Interactor and Quark interaction against mature Potatoes. If it does not harvest them, use a compatible harvesting machine or select another supported crop.
 - **Resolution criteria:** An installed-version test harvests a mature Potato, stores the drops, and leaves the field in the intended replanted state.
 
-### OCIA-022: Required robot tool upgrades are not finalized
+### OCIA-022: Inventory Controller tool management is operationally unverified
 
 - **Status:** In progress
 - **Area:** Robot hardware
-- **Risk:** Terrain clearing and tilling require several tools, but the assembled robot cannot currently switch its equipped tool or craft replacements autonomously.
-- **Current evidence:** The robot already contains an Inventory Upgrade. The user is adding an Inventory Controller Upgrade for automatic equipment swapping. Refined Storage, not the robot, will craft and stock replacement tools.
-- **Required mitigation:** Install the Inventory Controller Upgrade, verify robot component capacity, and test `equip` plus external inventory access after reassembly.
+- **Risk:** Terrain clearing and tilling require several tools, but component discovery alone does not prove that Wheatley can identify, equip, verify, replace, and return them safely.
+- **Current evidence:** Wheatley has been successfully assembled and booted with Inventory and Inventory Controller Upgrades; OpenOS reports `inventory_controller` available. `equip()`, detailed inventory inspection, external access, and replacement-tool flow remain untested. Refined Storage, not the robot, will craft tools.
+- **Required mitigation:** Test reversible `equip()` with an inexpensive tool, record internal/external slot structures, verify durability reporting, and exercise replacement and return through the selected dock inventory.
 - **Resolution criteria:** The assembled robot can identify, extract, equip, use, replace, and return every tool required by the terrain-preparation plan.
 
 ### OCIA-023: Robot loading and Interface inventory mapping need an in-game probe
@@ -198,9 +198,9 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Material staging
 - **Risk:** Incorrect side or slot assumptions could prevent tool withdrawal, mix deployment supplies, or send returned and recovered items to a non-insertable inventory.
-- **Current evidence:** Source investigation suggests an 18-slot combined Interface handler, but the installed robot-side mapping has not been exercised. Native `extractItem()` may make a dedicated adjacent staging chest preferable to depending on Interface provider slots.
-- **Required mitigation:** Test native extraction into a dedicated chest and probe the Interface from every relevant robot side before selecting and encoding the loading and return topology.
-- **Resolution criteria:** The chosen path reliably loads a known supply and tool, accepts a returned item, exposes actual delivered quantities, and rejects or reports a full or invalid destination.
+- **Current evidence:** Source investigation suggests an 18-slot combined Interface handler, but the installed mapping has not been exercised. Wheatley's existing dock Ender Chest is directly south of his North-facing resting pose. Separate EnderStorage supply and return frequencies are proposed but untested.
+- **Required mitigation:** Test native RS extraction into an inside supply chest, transfer through the matching dock chest, robot loading after the required rotation, and a separate return chest feeding an RS Importer. Keep the farm-output white/white/blue frequency isolated.
+- **Resolution criteria:** The selected topology reliably loads a known supply and tool, returns one test item, reconciles actual quantities at every inventory, avoids immediate re-import of supplies, and reports a full or invalid destination.
 
 ### OCIA-025: Refined Storage crafting API behavior is unverified
 
@@ -265,30 +265,30 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Define an explicit controller-side submission command or file format, generate a durable deployment ID before physical work, and initially allow only one active deployment.
 - **Resolution criteria:** Duplicate or stale submissions cannot start a second mission, and a deployment can be inspected and resumed independently of any RS crafting task.
 
-### OCIA-032: Terrain observations may be too weak for a safe plan
+### OCIA-032: Survey evidence may be misclassified by terrain interpretation
 
 - **Status:** Open
 - **Area:** Terrain surveying
-- **Risk:** Treating obstruction detection or a hardness estimate as exact block identity can produce the wrong excavation method, material estimate, or safety decision.
-- **Current evidence:** Installed 1.8.8 `robot.detect*` methods return only adjacent occupancy categories. `robot.compare*` requires a carried sample. The base Robot library exposes no general `inspect*` method.
-- **Required mitigation:** Define evidence levels for identified, compared, categorical, estimated, and unknown observations; probe representative Dirt, Stone, foliage, liquid, air, and modded blocks in-game; and reject plans whose unresolved evidence is safety-critical.
+- **Risk:** Treating obstruction detection, zero density, or a hardness estimate as exact block identity can produce the wrong excavation method, material estimate, or safety decision.
+- **Current evidence:** Wheatley's Geolyzer has positively identified adjacent `minecraft:grass` through `analyze()` and produced meaningful 3D density scans. Repeated solid readings varied by as much as `0.087` in one trial; zero cells remained zero. Scan values did not return registry identities, and one repeat is insufficient to define thresholds.
+- **Required mitigation:** Preserve raw samples and evidence levels for identified, compared, categorical, density, and unknown observations; probe representative terrain and modded blocks; never infer identity solely from density; and reject plans whose unresolved evidence is safety-critical.
 - **Resolution criteria:** A read-only 9x10 survey reports the evidence type at every required observation, distinguishes Dirt and Stone only through proven methods, and prevents `READY TO APPLY` when a required classification remains unsafe or unknown.
 
-### OCIA-033: Geolyzer value and robot compatibility are unverified
+### OCIA-033: Geolyzer coordinate mapping and production calibration are incomplete
 
-- **Status:** Open
-- **Area:** Robot hardware
-- **Risk:** Rebuilding the robot for a Geolyzer may be costly or exceed the current Tier 2 assembly limits without providing reliable material classification.
-- **Current evidence:** The installed manual permits Geolyzers in robots. Installed callbacks expose noisy density/hardness `scan` data and detailed adjacent `analyze` data, but neither has been exercised on this robot and current spare capacity has not been confirmed.
-- **Required mitigation:** Record the current assembled component/complexity budget, test the Geolyzer externally or in a controlled assembly where practical, and compare its survey value and energy cost with a no-Geolyzer route before recommending a rebuild.
-- **Resolution criteria:** An in-game test records actual `scan` and `analyze` structures, range, noise, energy cost, and modded-block behavior, and a documented capacity check establishes whether the upgrade is necessary and installable.
+- **Status:** In progress
+- **Area:** Terrain surveying
+- **Risk:** Incorrect flat-array order, axis rotation, zero-value interpretation, or noise tolerance can map real blocks to the wrong world coordinates or fabricate occupancy.
+- **Current evidence:** Wheatley boots with the Geolyzer and OpenOS reports it available, resolving the original assembly-compatibility concern. Adjacent `analyze()` and three 3x3x1 scan layers succeeded. The results correlate with the known North-facing depot layout, but rotation behavior, exact array-to-coordinate transform, broader noise, range, energy cost, and special-block behavior remain unverified.
+- **Required mitigation:** Repeat the asymmetric depot scan at all four headings, place known calibration blocks at selected offsets, characterize repeated measurements and energy use, and test air, zero-hardness blocks, liquids, foliage, entities, and representative modded blocks.
+- **Resolution criteria:** Tests establish a deterministic local-to-world transform, documented array order, safe zero/unknown policy, measured operation cost, and calibration policy that reproduces the known fixture without treating density as identity.
 
 ### OCIA-034: Inaccessible terrain cannot be fully classified before excavation
 
 - **Status:** Open
 - **Area:** Survey completeness
 - **Risk:** Hidden voids or unknown subsurface materials can invalidate fill-depth, recoverable-material, tool, and safety estimates after destructive work begins.
-- **Current evidence:** Detailed Geolyzer analysis is adjacent-only, while volume scans report noisy density or hardness rather than registry identity. No proven method identifies every inaccessible block in the five-block support depth.
+- **Current evidence:** Wheatley's detailed Geolyzer analysis is demonstrated but adjacent-only. Demonstrated volume scans report noisy density or hardness rather than registry identity. No proven method identifies every inaccessible block in the five-block support depth.
 - **Required mitigation:** Mark inaccessible cells as estimated or unknown, use conservative support/material assumptions, verify newly exposed conditions during apply, and stop or replan when observations exceed the accepted survey contract.
 - **Resolution criteria:** A test site containing a hidden void or unexpected subsurface block is either rejected during planning or discovered during bounded apply and causes safe replanning without exceeding the five-block fill policy.
 
@@ -297,7 +297,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Charging and recovery
 - **Risk:** The robot may reach the nominal station while misaligned, unpowered, or beside a Charger whose required redstone activation is disabled, then falsely report a successful return.
-- **Current evidence:** The conduit-powered Charger restored the Robot only after a Lever activated it. Autonomous docking, alignment, energy-increase detection, charge waiting, and resume have not been tested.
+- **Current evidence:** The conduit-powered Charger directly north of Wheatley's resting pose restored him only after its Lever activated it. The dock geometry is observed, but autonomous return, alignment, energy-increase detection, charge waiting, and resume have not been tested.
 - **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
 - **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
 
