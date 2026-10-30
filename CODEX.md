@@ -4,23 +4,25 @@
 
 This project implements an autonomous infrastructure deployment system inside a modded Minecraft survival world.
 
-OpenComputers robots act as construction workers. A stationary OpenComputers controller plans and supervises deployments. Refined Storage provides material provisioning, user-facing job submission, autocrafting, and completion tracking.
+OpenComputers robots act as construction workers. A stationary OpenComputers controller plans, supervises, and records deployments. Refined Storage is the inventory and autocrafting service used to provision those deployments.
 
-Conceptually, this is a Terraform-like Infrastructure as Code platform operating inside Minecraft, with Refined Storage acting as a rudimentary CI/CD pipeline:
+Conceptually, this is a Terraform-like Infrastructure as Code platform operating inside Minecraft, with the controller as its control plane and Refined Storage as its resource backend:
 
 ```text
-Refined Storage
-    -> material staging
-    -> controller planning and orchestration
-    -> wireless robot execution
-    -> construction verification
-    -> completion acknowledgment
-    -> Refined Storage
+deployment request
+    -> controller orchestration
+    -> robot site survey
+    -> controller terrain plan and bill of materials
+    -> Refined Storage inventory and autocrafting
+    -> staged robot supplies
+    -> terrain preparation and construction
+    -> controller verification and resource reconciliation
+    -> robot return to charging station
 ```
 
 The ultimate goal is to request a structure or machine installation, have the required materials provisioned and collected automatically, and have one or more robots navigate to the site, construct and verify the deployment, and report success without treating an incomplete build as successful.
 
-The completion protocol intentionally uses dead vegetation as its success token: this is Minecraft DevOps.
+The primary objective is reusable autonomous surveying, terrain preparation, and construction. A farm is the first full application, not a reason to assume a pre-cleared site.
 
 ## Runtime Target
 
@@ -64,25 +66,30 @@ Source files should be changed in the repository and then copied or synchronized
 
 ### Refined Storage
 
-Refined Storage provides the user-facing deployment request and material pipeline. It is responsible for:
+Refined Storage is a materials service, not the deployment state machine. The controller reaches the installed Refined Storage 1.6.16 network through the native `refinedstorage_interface` component exposed by a standard OpenComputers Adapter adjacent to an RS Interface. No additional integration mod or Refined Storage-specific adapter is required in the verified installation.
 
-- Accepting a deployment request through a processing pattern.
-- Crafting missing materials where recipes are available.
-- Delivering a deployment manifest to a staging inventory.
-- Holding the processing job open while construction is underway.
-- Recognizing a completion token only after successful construction.
+The intended Refined Storage service contract is:
 
-The completion token is a reusable Dead Bush. It is an output of a processing pattern, not an input. Its presence in a staging inventory does not by itself prove that a deployment request exists.
+- Reporting stored items and their quantities.
+- Exposing available crafting patterns.
+- Scheduling and reporting autocrafting work when a recipe exists.
+- Extracting requested supplies into a physically accessible staging inventory.
+- Accepting recovered, unused, and residual materials returned by the robot workflow.
 
-Refined Storage does not need to understand the external construction process. Its contract is to dispatch the declared inputs, keep the processing request pending, and accept the declared output only when the external system has completed successfully.
+Inventory identity is based on registry name plus relevant metadata and NBT, not display labels. An API method being exposed does not establish its semantics; each inventory, crafting, extraction, and insertion operation must be exercised against the installed version before production use.
 
-The initial design supports only one active deployment at a time. Direct Refined Storage/OpenComputers integration may be investigated separately, but it is not a prerequisite for the staging-inventory workflow.
+An RS crafting task only provisions a resource. Its completion says nothing about the physical construction result or the robot's safe return.
 
 ### Controller
 
 The stationary controller is authoritative for deployment intent and orchestration. It is responsible for:
 
 - Detecting and validating staged deployment materials.
+- Receiving deployment intent independently of RS crafting tasks.
+- Directing the robot's bounded site survey and interpreting its observations.
+- Computing terrain changes and a survey-derived bill of materials.
+- Querying stored and craftable resources, calculating deficits, and scheduling missing supplies.
+- Monitoring crafting, extraction, delivery, returns, and partial fulfillment.
 - Selecting a blueprint and deployment origin.
 - Converting blueprint data into an executable construction plan.
 - Assigning work to a known robot.
@@ -92,7 +99,8 @@ The stationary controller is authoritative for deployment intent and orchestrati
 - Recording deployment progress durably.
 - Stopping safely when execution becomes ambiguous.
 - Verifying all completion criteria.
-- Returning the completion token only for a verified deployment.
+- Reconciling allocated, loaded, recovered, consumed, returned, and missing resources.
+- Declaring construction and mission completion independently of RS task state.
 
 Higher-level planning belongs on the controller unless a robot needs local logic for safety or recovery.
 
@@ -105,6 +113,8 @@ The robot is a lightweight, defensive execution agent. It is responsible for:
 - Placing blocks from its inventory.
 - Inspecting the immediate environment where supported.
 - Retrieving materials from staging inventories when required by the workflow.
+- Surveying the bounded deployment footprint and reporting observations.
+- Loading supplies, unloading recovered materials, and requesting resupply through the controller.
 - Tracking relative position and orientation.
 - Checking local preconditions before changing the world.
 - Reporting actual operation results rather than transmission success.
@@ -180,9 +190,33 @@ For block placement, the executor should:
 
 Position and orientation are relative to an explicitly established deployment origin. Controller and robot pose should agree after every acknowledged navigation operation. If they cannot be reconciled, automated work stops.
 
-A completion token is an external assertion of success. It must never be returned for a failed, partially complete, unverified, or ambiguous deployment.
+Construction and mission completion are distinct states. At minimum, durable deployment state distinguishes:
 
-Refined Storage completion and robot mission completion are distinct states. Depositing the Dead Bush after verified construction completes the Refined Storage processing request. The robot mission remains active until the robot returns safely to its configured charging-station origin. A failure during the return trip does not invalidate completed construction, but it must remain visible as an incomplete robot mission requiring recovery.
+- Construction verified.
+- Resource reconciliation completed or explicitly reported incomplete.
+- Robot returned to the configured charging-station origin.
+- Mission complete.
+
+A failure during the return trip does not invalidate verified construction, but it remains an incomplete mission requiring recovery. RS crafting-task completion is only a provisioning event and must never advance one of these construction milestones by itself.
+
+## Survey-Driven Provisioning and Resource Accounting
+
+The controller surveys before committing to a terrain material manifest. It derives required excavation, clearance, fill, surface replacement, tools, and installation materials from observed conditions. This permits multiple supply trips and avoids encoding an unknown site into a fixed crafting recipe.
+
+Provisioning must handle unavailable patterns, missing ingredients, network power loss, delayed or failed crafts, partial extraction, full destination inventories, and interruptions between inventory mutation and acknowledgment. Reported stock is not proof of successful delivery.
+
+The controller accounts separately for:
+
+- Materials stored in RS.
+- Materials craftable through RS.
+- Materials allocated to the active deployment.
+- Materials physically loaded onto the robot.
+- Materials recovered from excavation.
+- Materials consumed by construction.
+- Materials returned to storage.
+- Materials lost or otherwise unaccounted for.
+
+Recovered material can offset gross fill requirements, but only after it has been observed and accounted for. Durable inventory transactions and reconciliation must prevent silent duplication, loss, or double allocation after a restart.
 
 ## Initial Validation Scenario
 
@@ -199,7 +233,7 @@ This scenario validates the complete control loop:
 - Failure and obstruction reporting.
 - Verified deployment completion.
 
-The platform should be built above known supporting terrain so ordinary OpenComputers placement rules are sufficient. It does not require generic terrain clearing, absolute navigation, autonomous material loading, or Refined Storage acknowledgment.
+The platform should be built above known supporting terrain so ordinary OpenComputers placement rules are sufficient. It does not require generic terrain clearing, absolute navigation, or autonomous material loading. It is a low-level control-loop test, not a substitute for the terrain-preparation MVP.
 
 ## Engineering Principles
 
@@ -223,7 +257,7 @@ The platform should be built above known supporting terrain so ordinary OpenComp
 
 The same architecture should support several farms and machine installations by changing blueprint data and supplied materials rather than rewriting the movement engine.
 
-The first complete farm target is a conventional 9x9 Potato field with central irrigation. It exists to establish reusable algorithms for terrain leveling, tilling, planting, machine placement, material handling, and end-to-end verification.
+The first complete farm target is a conventional 9x9 Potato field with central irrigation and a southern machinery row. It exists to establish reusable algorithms for surveying, excavation, filling, terrain leveling, tilling, planting, machine placement, dynamic material handling, and end-to-end verification. It must not require a manually cleared or leveled field.
 
 Crop-specific designs are expected. Sugar Cane, Cactus, trees, and other plants with nonstandard soil, spacing, water, or harvesting rules must use specialized blueprints rather than being forced into the conventional farmland layout.
 
@@ -239,6 +273,14 @@ Apples + Sugar + Water
 
 Farm blueprints may require terrain preparation, soil or substrate placement, crop planting, water placement, an appropriate Industrial Foregoing machine, a Range Addon, power distribution, a Wireless RF Transmitter or another energy connection, item collection, logistics, and remote item return through EnderStorage. Every modded block must have its placement, orientation, interaction, and verification behavior tested before generic automation is assumed.
 
-Potential extensions include bill-of-materials generation, dry-run planning, pre-deployment site validation, collision and obstruction detection, safe retry, idempotent operations, progress tracking, interrupted-operation recovery, persistent deployment history, material staging through a Transposer, autonomous charging, multiple robots, multiple deployment sites, machine orientation and configuration, EnderStorage logistics, and direct Refined Storage integration where the installed APIs support it.
+Potential extensions include dry-run planning, collision and obstruction detection, safe retry, idempotent operations, progress tracking, persistent deployment history, autonomous charging, multiple robots, multiple deployment sites, machine orientation and configuration, and EnderStorage logistics.
 
 These extensions must build on verified command execution and truthful completion reporting rather than bypassing them.
+
+## Historical Dead Bush Protocol
+
+The Dead Bush MacGuffin was a successful integration experiment, not a failed design. A tested RS processing pattern accepted 64 Dirt and declared one reusable Dead Bush as output. A Crafter staged the Dirt, an Exporter kept the token in the staging chest, and returning the token through an RS Interface completed the pending processing job. A pattern that both consumed and produced the token was correctly rejected as circular.
+
+This demonstrated that processing patterns can bridge an external asynchronous process. It is superseded as the primary deployment architecture because fixed recipe inputs do not fit survey-derived requirements, finite pattern inputs make diverse deployments awkward, and a crafting monitor is not the authoritative lifecycle for a robot mission. The exact practical per-slot input limit was not established and must not be stated as fact.
+
+The protocol may return later as an optional Crafting Grid trigger. It must not be required to provision resources, verify construction, or declare mission completion. Dead vegetation earned its place in project history, but it no longer runs the platform.

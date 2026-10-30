@@ -9,6 +9,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Mitigated:** The planned safeguard is implemented and verified.
 - **Accepted:** The limitation is understood and intentionally tolerated.
 - **Deferred:** Resolution is intentionally outside the current implementation scope.
+- **Superseded:** The original risk no longer applies because an architectural decision replaced the affected workflow; its history remains recorded.
 
 ## Active Issues
 
@@ -102,12 +103,12 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Use one physical operation per construction request or return structured completed-step data.
 - **Resolution criteria:** Controller pose is updated from structured results without parsing prose.
 
-### OCIA-011: Material identity cannot be inspected with current hardware
+### OCIA-011: Robot-carried material identity is not yet verified
 
 - **Status:** Open
 - **Area:** Inventory
-- **Risk:** The robot can count known slots but cannot read detailed item identities without an Inventory Controller Upgrade.
-- **Current evidence:** The robot has an Inventory Upgrade but no Inventory Controller Upgrade. The farm requirements call for switching among multiple equipped tools.
+- **Risk:** The controller can identify RS inventory, but the robot cannot yet prove which carried item or tool is in a slot during physical execution.
+- **Current evidence:** Native RS `getItems()` has distinguished registry IDs and metadata successfully. The robot has an Inventory Upgrade; an Inventory Controller Upgrade is planned but not yet validated. The farm requires switching among several equipped tools.
 - **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Before terrain preparation, install and validate an Inventory Controller Upgrade or adopt a workflow that does not require automatic tool swapping.
 - **Resolution criteria:** The prototype detects incorrect material before reporting success, and the robot can identify required materials and select every required tool safely.
 
@@ -156,24 +157,6 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Validate immediately before every physical action and stop on unexpected state. Consider site ownership only if concurrent deployments are introduced.
 - **Resolution criteria:** A changed target produces a safe obstruction result rather than replacement or continued blind execution.
 
-### OCIA-017: Refined Storage completion can be acknowledged falsely
-
-- **Status:** Open
-- **Area:** Job completion
-- **Risk:** Returning the Dead Bush before construction is fully verified causes Refined Storage to mark an incomplete job complete.
-- **Current evidence:** The token workflow is proven manually but is not connected to authoritative deployment state.
-- **Required mitigation:** Permit token return only from the terminal verified-success state. Never return it for failed or ambiguous deployments.
-- **Resolution criteria:** Failure and restart tests leave the processing job pending; only verified success returns the token.
-
-### OCIA-018: Staging contents do not uniquely identify a request
-
-- **Status:** Open
-- **Area:** Refined Storage integration
-- **Risk:** The reusable Dead Bush is normally present in staging and cannot prove that a processing request has started.
-- **Current evidence:** The Exporter continuously returns the token to the staging chest.
-- **Required mitigation:** Detect a request from a validated material manifest or direct Refined Storage job data and initially permit only one active deployment.
-- **Resolution criteria:** An idle staging chest cannot trigger construction, while a complete supported manifest triggers exactly one deployment.
-
 ### OCIA-019: Modded machines may require specialized placement or configuration
 
 - **Status:** Open
@@ -210,24 +193,97 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Install the Inventory Controller Upgrade, verify robot component capacity, and test `equip` plus external inventory access after reassembly.
 - **Resolution criteria:** The assembled robot can identify, extract, equip, use, replace, and return every tool required by the terrain-preparation plan.
 
-### OCIA-023: Refined Storage Interface slot mapping needs an in-game probe
+### OCIA-023: Robot loading and Interface inventory mapping need an in-game probe
 
 - **Status:** Open
 - **Area:** Material staging
-- **Risk:** Incorrect slot assumptions could prevent tool withdrawal or cause the robot to return the Dead Bush or reusable items to a non-insertable slot.
-- **Current evidence:** Refined Storage 1.6.16 source exposes an 18-slot combined item handler: nine import slots followed by nine export slots. OpenComputers uses one-based external slot numbers, implying import slots 1–9 and stocked export slots 10–18.
-- **Required mitigation:** Probe the installed Interface with `getInventorySize`, `getStackInSlot`, `suckFromSlot`, and `dropIntoSlot` from each relevant side before encoding the mapping.
-- **Resolution criteria:** An in-game test extracts a known tool from its stocked export slot and deposits a test item into an import slot that Refined Storage accepts.
+- **Risk:** Incorrect side or slot assumptions could prevent tool withdrawal, mix deployment supplies, or send returned and recovered items to a non-insertable inventory.
+- **Current evidence:** Source investigation suggests an 18-slot combined Interface handler, but the installed robot-side mapping has not been exercised. Native `extractItem()` may make a dedicated adjacent staging chest preferable to depending on Interface provider slots.
+- **Required mitigation:** Test native extraction into a dedicated chest and probe the Interface from every relevant robot side before selecting and encoding the loading and return topology.
+- **Resolution criteria:** The chosen path reliably loads a known supply and tool, accepts a returned item, exposes actual delivered quantities, and rejects or reports a full or invalid destination.
 
-### OCIA-024: Refined Storage can complete before the robot mission ends
+### OCIA-025: Refined Storage crafting API behavior is unverified
 
-- **Status:** Accepted
-- **Area:** Completion semantics
-- **Risk:** The Dead Bush can complete the external processing request even if the robot later becomes stranded while returning to charge.
-- **Current evidence:** The required contract defines token deposit as Refined Storage completion and arrival at the charging station as robot mission completion.
-- **Required mitigation:** Track `construction_verified`, `rs_acknowledged`, and `returned_to_charge` separately. Continue monitoring and report a recovery alert after acknowledgment until the robot reaches its origin.
-- **Resolution criteria:** A failed return trip leaves Refined Storage complete but records the robot mission as recovery-required rather than complete.
+- **Status:** Open
+- **Area:** Autocrafting integration
+- **Risk:** The controller may misinterpret patterns, task handles, failure states, or completion and wait forever or provision the wrong quantity.
+- **Current evidence:** `getPatterns`, `getPattern`, `hasPattern`, `scheduleTask`, `getTasks`, `getCraftingTasks`, and `cancelTask` are exposed, but none has been exercised. Only a displayed `scheduleTask` signature is recorded.
+- **Required mitigation:** Discover a known cheap pattern, schedule a minimal craft, record returned structures and task transitions, and test missing-material and missing-pattern behavior.
+- **Resolution criteria:** An installed-version test suite can distinguish accepted, active, successful, failed, unavailable, and cancelled crafting requests without treating craft completion as construction completion.
+
+### OCIA-026: Native extraction semantics and partial fulfillment are unverified
+
+- **Status:** Open
+- **Area:** Material staging
+- **Risk:** A query may report stock while extraction moves fewer or no items because of direction, adjacency, stack limits, or destination capacity.
+- **Current evidence:** `extractItem(stack, count, direction)` is exposed but has not been called. Direction constants, returned quantity, large-count behavior, and destination-full behavior are unknown.
+- **Required mitigation:** Extract one vanilla Dirt into an adjacent ordinary chest, verify both inventories, then test partial, over-one-stack, and full-destination cases using installed direction constants.
+- **Resolution criteria:** The controller records actual delivered quantity and distinguishes complete, partial, and failed extraction without assuming success from prior inventory data.
+
+### OCIA-027: Returning items to Refined Storage is unverified
+
+- **Status:** Open
+- **Area:** Resource return
+- **Risk:** Empty buckets, recovered blocks, unused supplies, and worn tools may be stranded or mistakenly reported as returned.
+- **Current evidence:** The Interface input inventory and `pushItems`, `pullItems`, and generic inventory methods are exposed, but no insertion path has been tested.
+- **Required mitigation:** Select a physical return path and verify one test item's transfer, RS inventory increase, rejection behavior, and full-storage handling.
+- **Resolution criteria:** Returned quantities are observed in RS and reconciled against robot/staging counts; failed returns remain visible and recoverable.
+
+### OCIA-028: Interrupted inventory operations have ambiguous outcomes
+
+- **Status:** Open
+- **Area:** Persistence and inventory transactions
+- **Risk:** A restart or lost response between extraction/insertion and checkpointing can cause duplicate requests, resource loss, or incorrect accounting.
+- **Current evidence:** No durable RS operation journal or reconciliation procedure exists, and mutation return semantics are not yet known.
+- **Required mitigation:** Journal intent before mutation, record observed results after mutation, and reconcile RS, staging, and robot inventories before retrying an interrupted operation.
+- **Resolution criteria:** Restart tests at each transaction boundary neither duplicate a transfer nor silently discard a discrepancy.
+
+### OCIA-029: Dynamic material allocation and recovered-resource accounting are undefined
+
+- **Status:** Open
+- **Area:** Resource planning
+- **Risk:** Concurrent stock changes, partial supply trips, or recovered excavation material can produce over-allocation, shortages, or an incorrect net bill of materials.
+- **Current evidence:** The native inventory list is readable, but no reservation ledger or survey-derived manifest implementation exists.
+- **Required mitigation:** Maintain separate stored, craftable, allocated, loaded, recovered, consumed, returned, and unaccounted quantities; initially limit provisioning to one active deployment.
+- **Resolution criteria:** A deployment with at least one partial resupply and recovered Dirt reconciles every unit or reports a specific discrepancy.
+
+### OCIA-030: Refined Storage availability and task failure can stall a deployment
+
+- **Status:** Open
+- **Area:** External service reliability
+- **Risk:** Network power loss, disconnection, insufficient ingredients, insufficient storage, or a stuck craft can leave the controller waiting indefinitely or send an under-supplied robot.
+- **Current evidence:** `isConnected()` and inventory enumeration work while the network is healthy; failure behavior has not been tested.
+- **Required mitigation:** Add bounded waits, connectivity checks, task failure detection, clear operator diagnostics, and a safe paused state before physical execution or resupply.
+- **Resolution criteria:** Each tested service failure stops or pauses safely, preserves deployment state, and can resume or abort without falsely completing the mission.
+
+### OCIA-031: Deployment request ingress and identity are undefined
+
+- **Status:** Open
+- **Area:** Job submission
+- **Risk:** Removing processing-pattern job detection leaves no formal contract for starting, identifying, or rejecting duplicate deployment requests.
+- **Current evidence:** The controller is now authoritative, but the initial command interface and durable deployment-ID creation flow have not been selected. The Dead Bush may be an optional future trigger only.
+- **Required mitigation:** Define an explicit controller-side submission command or file format, generate a durable deployment ID before physical work, and initially allow only one active deployment.
+- **Resolution criteria:** Duplicate or stale submissions cannot start a second mission, and a deployment can be inspected and resumed independently of any RS crafting task.
 
 ## Resolved Issues
 
-No issues have been resolved in the tracked implementation yet.
+### OCIA-017: Refined Storage completion can be acknowledged falsely
+
+- **Status:** Superseded
+- **Area:** Legacy job completion
+- **Original risk:** Returning the Dead Bush before verification would complete an incomplete RS processing job.
+- **Disposition:** Native RS integration replaced the token as the required deployment workflow. The controller now owns construction and mission state, and no Dead Bush is returned to complete a deployment. The risk remains relevant only if the optional legacy trigger is reintroduced.
+
+### OCIA-018: Staging contents do not uniquely identify a request
+
+- **Status:** Superseded
+- **Area:** Legacy request detection
+- **Original risk:** The continuously exported Dead Bush could not prove that a processing request had begun.
+- **Disposition:** Staging contents no longer initiate deployments. Deployment intent is controller-owned; staged inventory is fulfillment for an identified deployment. Transfer identity and quantity risks are tracked by OCIA-026 through OCIA-029.
+
+### OCIA-024: Refined Storage can complete before the robot mission ends
+
+- **Status:** Superseded
+- **Area:** Legacy completion semantics
+- **Original risk:** The RS processing task could complete at token deposit while the robot later failed to return to charge.
+- **Disposition:** RS task completion is now only a resource-provisioning event. Required milestones are `construction_verified`, `resources_reconciled`, `returned_to_charge`, and `mission_complete`; no `rs_acknowledged` milestone remains.

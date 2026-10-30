@@ -7,7 +7,7 @@ The evergreen project purpose, architecture, and engineering constraints are def
 ## Current State
 
 - Repository: `/home/isaac/dev/opencomputers`
-- The repository contains snapshots of two OpenOS disks and has no Git commits.
+- The repository contains snapshots of two OpenOS disks and is under Git version control.
 - Controller disk: `7762455c-2ffb-4307-ac41-4faa2ae6a3a1`
 - Robot disk: `d4d31815-680c-4fb8-a846-ee3c6d49be69`
 - Controller program: `home/drive.lua`
@@ -87,29 +87,95 @@ The controller originally asserted an unconditional `modem.open(4242)`, which fa
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
 
-### Proven Refined Storage completion workflow
+### Confirmed native Refined Storage integration
 
-The reusable Dead Bush completion mechanism has been manually tested end to end with Refined Storage 1.6.16.
+The stationary Tier 2 controller is connected to the powered Refined Storage 1.6.16 network through this tested adjacent-block topology:
 
-The proof-of-concept processing pattern is:
+```text
+[OC Computer Case] -> [OC Adapter] -> [RS Interface] -> [RS Cable] -> [RS Network]
+```
 
-- Input: 64 Dirt.
-- Output: 1 Dead Bush.
-- An RS Crafter points into a material-staging chest.
-- An RS Exporter points into the same chest and continuously exports Dead Bushes, so the token normally remains in staging rather than available in Refined Storage.
+The Adapter connects directly to the Computer Case; no OC Cable or additional integration mod was needed. It is the standard OpenComputers `Adapter` (`opencomputers:adapter`, ore dictionary `oc:adapter`), not an RS-specific item.
 
-The validated cycle is:
+OpenOS `components` discovered:
 
-1. The player requests one Dead Bush from the RS Crafting Grid.
-2. Refined Storage sends 64 Dirt into the staging chest.
-3. The Crafting Monitor shows the processing job as pending.
-4. The Exporter has already placed the reusable Dead Bush in staging.
-5. An external worker collects the materials and Dead Bush.
-6. After completing the external work, the worker deposits the Dead Bush into an RS Interface.
-7. Refined Storage recognizes the expected output and completes the processing job.
-8. The Exporter returns the Dead Bush to staging for reuse.
+```text
+refinedstorage_interface
+775ac4ed-4249-433f-88d9-9c93625f4421
+```
 
-A processing pattern that both consumed and produced the Dead Bush was tested and rejected by Refined Storage as a circular dependency. The token must remain output-only. Its ordinary presence in staging does not indicate a pending job, so the controller must validate the material manifest or obtain another authoritative request signal. Initially, only one deployment may be active, and no failed or incomplete deployment may return the token.
+The following interactive tests succeeded against the actual factory network:
+
+```lua
+rs = require("component").refinedstorage_interface
+print("Connected:", rs.isConnected())
+-- Connected: true
+
+items = rs.getItems()
+print("Item types:", #items)
+-- Item types: 396
+
+for i=1,math.min(#items,10) do local v=items[i]; print(v.label or v.name, v.size or v.count) end
+```
+
+The first ten returned entries were:
+
+```text
+Mining Multitool          1
+Anvil                     1
+Nether Wart             120
+Terracotta                1
+Oak Wood Planks           3
+Bronze Sharpening Kit     1
+Raw Calamari              7
+Magic Wax                 1
+Amnesic Wax               1
+Oak Trim                  3
+```
+
+Filtering Dirt variants with
+
+```lua
+for _,v in ipairs(items) do if (v.label or ""):lower():find("dirt",1,true) then print(v.label,v.name,v.damage,v.size) end end
+```
+
+returned:
+
+```text
+Purple Slimy Dirt  tconstruct:slime_dirt  2  144
+Green Slimy Dirt   tconstruct:slime_dirt  0  136
+Dirt               minecraft:dirt         0  2448
+```
+
+This verifies component discovery, network connectivity, inventory enumeration, quantities, registry identifiers, and metadata discrimination. Material matching should use registry identifiers plus relevant metadata/NBT rather than display labels.
+
+`components -l refinedstorage_interface` also exposed these methods:
+
+- Network and inventory: `isConnected`, `getItems`, `getItem`, `getMetadata`, `getStorages`, `getNetworkEnergyStored`, `getNetworkEnergyUsage`, `getNodeEnergyUsage`, `getEnergyUsage`, and `listAvailableItems`.
+- Autocrafting: `getPatterns`, `getPattern`, `hasPattern`, `scheduleTask`, `getCraftingTasks`, `getTasks`, and `cancelTask`.
+- Item transfer: `extractItem`, `pullItems`, and `pushItems`.
+- Generic inventory: `size`, `suck`, `drop`, and `list`.
+- Fluids: `getFluids`, `getFluid`, `getFluidPatterns`, `getFluidPattern`, `hasFluidPattern`, `scheduleFluidTask`, `cancelFluidTask`, and `extractFluid`.
+- Utility: `getDocs`.
+
+Visible help included these signatures:
+
+```lua
+getItems():table
+getItem(stack:table[, compareMeta:boolean[, compareNBT:boolean]]):table
+scheduleTask(stack:table, count:number, canSchedule:boolean):table
+extractItem(stack:table, count:number, direction:number):table
+```
+
+Only `isConnected()` and `getItems()` have been exercised successfully. Individual item queries, pattern discovery, craft scheduling and monitoring, physical extraction, insertion, direction semantics, optional arguments, and return structures remain unverified.
+
+The OpenOS REPL produced a stack trace and `end` syntax error when a multiline program was pasted as one block. Individual statements using persistent globals worked. Prefer host-maintained `.lua` probes over multiline REPL pastes.
+
+### Superseded Dead Bush workflow
+
+The Dead Bush MacGuffin processing-pattern cycle was manually tested successfully: 64 Dirt was staged as input, a reusable Dead Bush was declared as output and kept in staging by an Exporter, and returning it through an Interface completed the pending job. A pattern consuming and producing the same token was rejected as circular.
+
+That mechanism is no longer the primary architecture. A survey-derived material requirement does not fit a fixed processing recipe, and RS task completion is not construction or mission completion. The protocol remains a proven historical technique and possible optional Crafting Grid trigger; deployments must neither require nor return a Dead Bush.
 
 ### Pending local configuration
 
@@ -117,8 +183,9 @@ The following values still need to be recorded when required by implementation:
 
 - Controller modem address.
 - Robot modem address.
-- Staging inventory location and component addresses.
+- Robot-accessible staging and return inventory locations plus remaining component addresses.
 - Deployment origins, headings, and site coordinates.
+- Initial controller-side deployment submission interface.
 
 The UUID-named repository directories identify the captured disk trees; do not assume they are modem addresses or live deployment paths.
 
@@ -137,8 +204,9 @@ These choices are proposed for the first implementation and should be revised he
 - Represent blueprints as block-coordinate data and generate movement on the controller.
 - Build the first platform one block above known supporting terrain.
 - Carry nine consumable dirt blocks plus one reserved dirt comparison block for exact verification.
-- Defer Refined Storage automation until standalone construction completes reliably.
-- Investigate historical direct Refined Storage/OpenComputers integration separately; do not make it a prerequisite for the initial staging workflow.
+- Keep the controller authoritative for deployment state; use native RS integration only as an inventory and autocrafting service.
+- Survey before calculating the terrain bill of materials, then allow staged extraction, multiple supply trips, recovered-material credit, and explicit reconciliation.
+- Continue validating the standalone 3x3 control loop before coupling physical construction to automated provisioning.
 
 ## Potato Farm MVP Requirements
 
@@ -197,9 +265,9 @@ DDDDDDDDD
 - Leave or excavate the central position for water.
 - Place a source block using the RS-supplied water bucket.
 - Till the remaining 80 Dirt blocks with a Hoe.
-- Receive 80 Potatoes from the Refined Storage processing pattern and plant one Potato in each of the 80 tilled positions.
+- Provision 80 Potatoes through the controller's native Refined Storage workflow and plant one Potato in each of the 80 tilled positions.
 - Return the empty bucket to the return Interface after deployment.
-- Treat missing Potatoes, failed planting, or an unverified crop position as deployment failure; do not return the Dead Bush token.
+- Treat missing Potatoes, failed planting, or an unverified crop position as deployment failure.
 
 ### Machine and logistics construction
 
@@ -213,25 +281,25 @@ DDDDDDDDD
 
 ### Materials and tools
 
-- Building materials, machine blocks, the Tier 4 Range Addon, water bucket, exactly 80 Potatoes, and stone tools are intended to come from Refined Storage staging.
-- Reusable or residual items, including the empty bucket, return through the RS Interface used for completion handling.
+- Building materials, machine blocks, the Tier 4 Range Addon, water bucket, exactly 80 Potatoes, and stone tools are provisioned from Refined Storage after the controller computes the survey-derived requirements.
+- Reusable, recovered, or residual items, including the empty bucket, return to Refined Storage through a verified insertion workflow.
 - The user intends automatic tool switching and replacement stone tools.
 - The robot already has an Inventory Upgrade. The user is adding an Inventory Controller Upgrade for automatic equipped-tool swapping.
-- The robot will not craft tools. The RS Interface will have a Refined Storage Crafting Upgrade and will stock finished tools through its configured export/provider slots.
-- Refined Storage 1.6.16 source exposes the Interface externally as 18 slots. From OpenComputers' one-based perspective, slots 1–9 should be the import/return inventory and slots 10–18 should be the stocked export inventory. The export filter row and four upgrade slots are not externally exposed through this item handler.
-- Verify that mapping from the robot with an in-game probe before hardcoding slot numbers or sides.
+- The robot will not craft tools. The controller should request finished replacement tools through RS and make them physically available to the robot.
+- Earlier source investigation suggests that the Interface exposes an 18-slot external inventory with import/return and stocked-export regions, but the robot-side slot and side mapping is not verified. Native extraction to a dedicated adjacent staging chest may avoid depending on those provider slots; test both loading and return paths before choosing one.
 
 ### MVP completion intent
 
 Verify as much as the installed APIs reasonably permit, including terrain shape, Dirt/farmland state, water placement, machine positions and orientation, logistics placement, addon installation, power availability, planted crop state, item extraction, returned bucket, and robot recovery or return state. Unsupported verification must be reported explicitly rather than silently treated as success.
 
-Completion has three explicit milestones:
+Completion has four explicit milestones:
 
 1. `construction_verified`: the farm satisfies all supported construction and functional checks.
-2. `rs_acknowledged`: the robot deposits the Dead Bush MacGuffin token, completing the Refined Storage processing job.
-3. `returned_to_charge`: the robot returns to the configured charging-station origin; only then is the robot mission complete.
+2. `resources_reconciled`: allocated, loaded, recovered, consumed, returned, and missing resources are reconciled or any discrepancy is explicitly recorded.
+3. `returned_to_charge`: the robot returns to the configured charging-station origin.
+4. `mission_complete`: the preceding required milestones are satisfied.
 
-If return fails after token deposit, construction and Refined Storage remain complete, but the robot mission enters recovery-required state.
+If return fails after construction verification, construction remains complete but the robot mission enters recovery-required state. RS crafting tasks and the optional Dead Bush trigger do not define these milestones.
 
 ## Roadmap
 
@@ -328,43 +396,46 @@ Goal: complete the reference vertical slice defined in `CODEX.md`.
 
 Related risks: OCIA-003, OCIA-004, OCIA-005, OCIA-013, OCIA-014, OCIA-015, OCIA-016.
 
-### Phase 6: Integrate material staging
+### Phase 6: Validate the native Refined Storage API
 
-Goal: replace manual dirt loading with a controlled staging workflow.
+Goal: turn discovered component methods into a tested, version-specific inventory service contract.
 
-- Confirm the staging inventory geometry and controller component access.
-- Evaluate a Transposer for inventory inspection and transfer.
-- Decide whether the robot loads itself or the controller transfers into a fixed loading inventory.
-- Validate a complete manifest before starting a deployment.
-- Ensure idle staging contents cannot trigger a job.
-- Keep only one active deployment request until request identity is unambiguous.
-- Install and validate the confirmed Inventory Controller Upgrade.
-- Probe the Interface's expected 1–9 import and 10–18 export slot mapping from the robot.
+- Test A — call `getItem()` for `{name="minecraft:dirt", damage=0}` and record the returned structure plus metadata/NBT matching behavior.
+- Test B — use `hasPattern()`, `getPattern()`, or `getPatterns()` for a simple known autocraftable item and record its output representation.
+- Test C — schedule one inexpensive craft and determine accepted arguments, task handles, monitoring through `getTasks()` or `getCraftingTasks()`, and behavior with missing ingredients or no pattern.
+- Test D — place an ordinary chest adjacent to the Interface and extract one vanilla Dirt. Determine installed-version direction constants, stack format, physical adjacency, return quantity, chest receipt, RS inventory delta, and partial-extraction behavior.
+- Test E — return one item to RS through the appropriate Interface inventory or exposed method and verify both the physical transfer and RS inventory increase.
+- Test F — exercise or safely simulate network disconnection, absent materials, insufficient storage, a craft that cannot proceed, a full destination, extraction beyond one stack, and controller/game restart during an inventory operation.
+- Keep the first craft and transfer deliberately cheap and small.
+- Capture actual structures and errors in this file and convert durable behavior into tests or `CODEX.md` guidance.
+- Do not promote a discovered method to a supported project capability until its observed behavior is recorded.
 
-Related risks: OCIA-011, OCIA-018, OCIA-022, OCIA-023.
+Related risks: OCIA-025, OCIA-026, OCIA-027, OCIA-028, OCIA-030.
 
-### Phase 7: Connect the Dead Bush acknowledgment
+### Phase 7: Implement survey-driven resource provisioning
 
-Goal: make Refined Storage processing completion truthfully represent verified construction.
+Goal: compute and fulfill a dynamic manifest without coupling deployment completion to an RS crafting job.
 
-- Bind a supported material manifest to one blueprint and version.
-- Claim the reusable token only as part of an accepted deployment request.
-- Keep the token under controller authority during execution.
-- Deposit the token into the Refined Storage Interface only from verified-success state.
-- Retain the token and leave the processing job pending after failure or ambiguity.
-- Continue the robot mission after acknowledgment until it returns to the charging origin.
-- Distinguish a successful RS job with a failed return trip from complete robot mission success.
-- Test success, obstruction, missing materials, restart, and manual cancellation.
+- Define the initial controller-side submission contract and persist a deployment ID before surveying or provisioning.
+- Define a bounded site-survey report and generate excavation, clearance, fill, replacement-surface, tool, and installation requirements from it.
+- Credit recoverable excavation material only after it is observed and allocated.
+- Track stored, craftable, allocated, loaded, recovered, consumed, returned, and missing quantities separately.
+- Reserve resources for one active deployment and detect changes between inventory query, crafting, and extraction.
+- Stage verified quantities in a dedicated accessible inventory and support partial fulfillment and multiple resupply trips.
+- Choose and verify the robot loading path, including the Inventory Controller Upgrade and tool switching.
+- Return the empty bucket, recovered blocks, unused supplies, and worn tools through the tested insertion path.
+- Journal inventory mutations so restart ambiguity leads to reconciliation rather than blind replay.
+- Keep the Dead Bush workflow outside the required provisioning and completion state machines.
 
-Related risks: OCIA-017, OCIA-018, OCIA-024.
+Related risks: OCIA-011, OCIA-022, OCIA-023, OCIA-026, OCIA-027, OCIA-028, OCIA-029, OCIA-030, OCIA-031.
 
 ### Phase 8: Develop the Potato farm MVP
 
 Goal: extend the proven deployment system to the production use case.
 
-- Finalize the 9x10 site contract and variable bill of materials for terrain fill.
+- Finalize the 9x10 site-survey contract and generate the variable bill of materials from observed terrain.
 - Test clearing, five-block fill, surface replacement, tilling, and Potato planting.
-- Validate receipt and successful planting of all 80 processing-pattern Potatoes.
+- Validate provisioning, receipt, and successful planting of all 80 Potatoes.
 - Test placement and orientation for water, the selected harvester, Tier 4 Range Addon, Wireless RF Transmitter, multipart Transfer Node/Pipe, and Ender Chest.
 - Test source-water placement from the supplied bucket and return of the empty bucket.
 - Define machine configuration and verification as typed actions.
@@ -372,7 +443,7 @@ Goal: extend the proven deployment system to the production use case.
 - Evaluate charging, chunk loading, and return-to-base needs for the selected site.
 - Implement the farm only from individually verified block and machine behaviors.
 
-Related risks: OCIA-011, OCIA-014, OCIA-015, OCIA-019, OCIA-021, OCIA-022.
+Related risks: OCIA-011, OCIA-014, OCIA-015, OCIA-019, OCIA-021, OCIA-022, OCIA-029.
 
 ### Phase 9: Add specialized crop blueprints
 
@@ -388,22 +459,23 @@ Related risks: OCIA-019, OCIA-021.
 
 ## Immediate Next Work
 
-The next implementation session should begin with Phase 0 and Phase 1:
+The next software implementation session should continue with Phase 1 while preserving the committed repository baseline:
 
-1. Inspect any repository-layout preference supplied by the user.
-2. Define protocol version 1 and configuration files.
-3. Add tests for the pure protocol logic.
-4. Update `robotd.lua` with compatible dispatch and safe port handling.
-5. Add a minimal controller probe that unicasts `status` and validates the correlated reply.
-6. Test legacy `drive.lua` and the new status probe in Minecraft before adding physical construction operations.
+1. Define protocol version 1 and configuration files.
+2. Add tests for the pure protocol logic.
+3. Update `robotd.lua` with compatible dispatch and safe port handling.
+4. Add a minimal controller probe that unicasts `status` and validates the correlated reply.
+5. Test legacy `drive.lua` and the new status probe in Minecraft before adding physical construction operations.
+
+The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
 ## Handoff Notes
 
-- Existing source files are uncommitted user-owned files; preserve them carefully.
+- Existing source and unrelated user changes must be preserved carefully.
 - The controller-side port-open guard is present and known to work.
 - The same guard is absent from the robot daemon.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
 - Detailed item-stack inspection does require an Inventory Controller Upgrade.
 - Ordinary robot placement requires a supporting surface unless Angel placement is available.
 - OpenComputers defaults permit at most eight packet data parts and 8192 bytes per packet; keep messages compact.
-- Do not connect Dead Bush return logic until the standalone construction success state is reliable.
+- Do not implement mandatory Dead Bush return logic; it is an optional legacy trigger only.
