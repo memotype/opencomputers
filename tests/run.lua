@@ -172,7 +172,11 @@ local function virtualFilesystem()
         position = #content + 1
         return value
       end,
-      close = function() return true end
+      close = function()
+        local closeFailed = hit("close")
+        if closeFailed then error("injected close failure") end
+        return true
+      end
     }
   end
   return v
@@ -448,7 +452,8 @@ end)
 test("append open, write, partial-write, and flush failures fail closed", function()
   for _, fault in ipairs({
     {"open", false, "ready"}, {"write", false, "ready"},
-    {"write", true, "recovery_required"}, {"flush", false, "ready"}
+    {"write", true, "recovery_required"}, {"flush", false, "ready"},
+    {"close", false, "ready"}
   }) do
     local vfs, store = commissionedFilesystem()
     local instance, calls = makeExecutor(store)
@@ -460,6 +465,41 @@ test("append open, write, partial-write, and flush failures fail closed", functi
     vfs.clearFault()
     local restarted, restartCalls = makeExecutor(journalStore(vfs))
     equal(restarted.snapshot.mode, fault[3], fault[1] .. "/" .. tostring(fault[2]))
+    equal(restartCalls(), 0)
+  end
+end)
+
+test("close exceptions at execution boundaries fail closed", function()
+  local cases = {
+    {1, 0, "journal_untrusted", "failed", "interrupted_before_execution"},
+    {2, 0, "prepared_resolution_unpersisted", "recovery_required",
+      "physical_outcome_unknown"},
+    {3, 1, "physical_outcome_unknown", "succeeded", "operation_succeeded"}
+  }
+  for _, item in ipairs(cases) do
+    local vfs, store = commissionedFilesystem()
+    local instance, calls = makeExecutor(store)
+    vfs.setFault("close", item[1])
+    local reply = instance:handle(physical(1, "move_forward"))
+    if item[1] < 3 then
+      equal(reply.outcome, "rejected")
+      equal(reply.payload.code, "persistence_failed_before_execution")
+    else
+      equal(reply.outcome, "recovery_required")
+      equal(reply.payload.code, "completion_persistence_failed")
+    end
+    equal(calls(), item[2])
+    equal(instance.snapshot.journal.health, "uncertain_write")
+    local blocked = instance:handle(physical(1, "move_forward"))
+    equal(blocked.outcome, "recovery_required")
+    equal(blocked.payload.code, item[3])
+    equal(calls(), item[2])
+
+    vfs.clearFault()
+    local restarted, restartCalls = makeExecutor(journalStore(vfs))
+    local retried = restarted:handle(physical(1, "move_forward"))
+    equal(retried.outcome, item[4])
+    equal(retried.payload.code, item[5])
     equal(restartCalls(), 0)
   end
 end)
@@ -518,7 +558,8 @@ end)
 
 test("compaction failures preserve a safe primary or reconstruct fail-closed", function()
   local cases = {
-    {"open", 1}, {"write", 1}, {"flush", 1}, {"read", 1},
+    {"open", 1}, {"write", 1}, {"flush", 1}, {"close", 1}, {"close", 4},
+    {"read", 1},
     {"rename", 1}, {"rename", 2}, {"remove", 1}, {"remove", 2}
   }
   for _, fault in ipairs(cases) do
@@ -569,6 +610,62 @@ test("manual legacy movement invalidates pose without sharing protocol dispatch"
   equal(parsed.count, 3)
   equal(parsed.operation, "move_forward")
   equal(legacy.parse(protocol.MAGIC, 1), nil)
+end)
+
+test("manual recovery preserves ambiguous execution identity across restart", function()
+  local vfs, store = commissionedFilesystem()
+  local snapshot = assert(store.load())
+  local item = physical(1, "move_forward")
+  assert(store.append(snapshot, {kind = "prepared", epoch = epoch, sequence = 1,
+    request_id = item.request_id, fingerprint = item.fingerprint,
+    deployment_id = item.deployment_id, operation = item.operation}))
+  assert(store.append(snapshot, {kind = "executing", sequence = 1,
+    request_id = item.request_id}))
+
+  local interrupted, interruptedCalls = makeExecutor(journalStore(vfs))
+  equal(interrupted.snapshot.mode, "recovery_required")
+  equal(interrupted:handle(item).payload.code, "physical_outcome_unknown")
+  equal(interruptedCalls(), 0)
+  truthy(interrupted:beginManualRecovery())
+  equal(interrupted.snapshot.pose.trusted, false)
+
+  local restartedStore = journalStore(vfs)
+  local restarted, restartCalls = makeExecutor(restartedStore)
+  local retry = restarted:handle(item)
+  equal(retry.outcome, "recovery_required")
+  equal(retry.payload.code, "physical_outcome_unknown")
+  equal(retry.payload.physical_outcome, "unknown")
+  equal(restarted.snapshot.pose.trusted, false)
+  local conflict = restarted:handle(physical(1, "turn_left"))
+  equal(conflict.outcome, "rejected")
+  equal(conflict.payload.code, "request_id_conflict")
+  equal(restartCalls(), 0)
+
+  local newEpoch = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+  truthy(restartedStore.commission(newEpoch, pose.new()))
+  local recommissioned, commissionedCalls = makeExecutor(journalStore(vfs))
+  local stale = recommissioned:handle(item)
+  equal(stale.outcome, "rejected")
+  equal(stale.payload.code, "stale_epoch")
+  equal(commissionedCalls(), 0)
+  equal(recommissioned:handle(physical(1, "turn_right", newEpoch)).outcome,
+    "succeeded")
+end)
+
+test("manual recovery preserves ordinary bounded result retirement", function()
+  local vfs, store = commissionedFilesystem(1)
+  local instance, calls = makeExecutor(store, {recent_limit = 1})
+  equal(instance:handle(physical(1, "turn_right")).outcome, "succeeded")
+  equal(instance:handle(physical(2, "turn_right")).outcome, "succeeded")
+  truthy(instance:beginManualRecovery())
+  local restarted, restartCalls = makeExecutor(journalStore(vfs, 1),
+    {recent_limit = 1})
+  local retired = restarted:handle(physical(1, "turn_right"))
+  equal(retired.outcome, "rejected")
+  equal(retired.payload.code, "retired_request")
+  equal(restarted.snapshot.pose.trusted, false)
+  equal(calls(), 2)
+  equal(restartCalls(), 0)
 end)
 
 local function eventQueue(events)

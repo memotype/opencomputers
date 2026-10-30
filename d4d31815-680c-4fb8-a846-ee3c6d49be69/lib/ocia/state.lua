@@ -250,7 +250,6 @@ function state.applyRecord(snapshot, fields, recentLimit)
   elseif kind == "manual" then
     snapshot.mode = "recovery_required"
     snapshot.pose = pose.unknown(snapshot.pose, "legacy manual movement")
-    snapshot.in_flight = nil
     snapshot.last_error = "legacy manual movement invalidated autonomous pose"
   else
     return nil, "unsupported journal record " .. tostring(kind)
@@ -298,14 +297,27 @@ function state.journalStore(path, options)
     return type(value) == "number" and value or 0
   end
 
+  local function closeHandle(handle)
+    local closed, reason = pcall(function() return handle:close() end)
+    if not closed then return nil, tostring(reason) end
+    return true
+  end
+
   local function writeLine(file, mode, line)
     local handle, reason = open(file, mode)
     if not handle then return nil, "open failed: " .. tostring(reason) end
     local wrote, writeReason = handle:write(line)
-    if not wrote then handle:close(); return nil, "write failed: " .. tostring(writeReason) end
+    if not wrote then
+      closeHandle(handle)
+      return nil, "write failed: " .. tostring(writeReason)
+    end
     local flushed, flushReason = handle:flush()
-    if not flushed then handle:close(); return nil, "flush failed: " .. tostring(flushReason) end
-    handle:close()
+    if not flushed then
+      closeHandle(handle)
+      return nil, "flush failed: " .. tostring(flushReason)
+    end
+    local closed, closeReason = closeHandle(handle)
+    if not closed then return nil, "close failed: " .. tostring(closeReason) end
     return true
   end
 
@@ -319,25 +331,26 @@ function state.journalStore(path, options)
       if line == nil then break end
       consumed = consumed + #line + 1
       local fields, decodeReason = state.decodeRecord(line)
-      if not fields then handle:close(); return nil, decodeReason end
+      if not fields then closeHandle(handle); return nil, decodeReason end
       local sequence, sequenceReason = numberField(fields, "journal_sequence")
-      if not sequence then handle:close(); return nil, sequenceReason end
+      if not sequence then closeHandle(handle); return nil, sequenceReason end
       if sequence ~= expectedSequence then
-        handle:close(); return nil, "journal sequence is not contiguous"
+        closeHandle(handle); return nil, "journal sequence is not contiguous"
       end
       if not sawCheckpoint then
         if fields.kind ~= "checkpoint" then
-          handle:close(); return nil, "journal does not begin with a checkpoint"
+          closeHandle(handle); return nil, "journal does not begin with a checkpoint"
         end
         sawCheckpoint = true
       elseif fields.kind == "checkpoint" then
-        handle:close(); return nil, "unexpected checkpoint in journal"
+        closeHandle(handle); return nil, "unexpected checkpoint in journal"
       end
       local applied, applyReason = state.applyRecord(snapshot, fields, recentLimit)
-      if not applied then handle:close(); return nil, applyReason end
+      if not applied then closeHandle(handle); return nil, applyReason end
       expectedSequence = expectedSequence + 1
     end
-    handle:close()
+    local closed, closeReason = closeHandle(handle)
+    if not closed then return nil, "close failed: " .. tostring(closeReason) end
     if not sawCheckpoint then return nil, "journal is empty" end
     local bytes = fileSize(file)
     if consumed ~= bytes then return nil, "journal has a partial final record" end

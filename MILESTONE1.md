@@ -52,6 +52,7 @@ Restart classification is deliberately conservative:
 - A healthy journal ending at `prepared` proves the Robot API call had not begun. Startup appends a `failed / interrupted_before_execution` completion with `physical_outcome=not_started`. Only after that completion persists is the result a definite nonexecution result.
 - If that prepared-request resolution cannot be persisted, Wheatley remains `recovery_required`; it does not execute the request.
 - A journal ending at `executing` cannot prove whether the physical call changed the world. Wheatley marks pose untrusted, reports `recovery_required / physical_outcome_unknown`, and never executes the matching request again.
+- A durable legacy-manual recovery record does not erase an unresolved `executing` identity. Manual movement remains available with untrusted pose, but matching retries continue to report unknown outcome and conflicts remain non-executable across restart until explicit origin recommissioning retires the epoch.
 - A conflicting reuse of an unresolved sequence is rejected by request identity and fingerprint checks without invoking the Robot API.
 - A durable `completed` record returns its original cached outcome when the identical request is delivered again.
 
@@ -59,7 +60,7 @@ The journal retains only a bounded recent-result window, configured by `recent_r
 
 When `compact_records` (default `128`) or `compact_bytes` (default `65536`) is reached, the daemon writes a replacement journal containing a new checkpoint plus the retained recent results. Replacement uses `.switch`, `.new`, and `.old` artifacts, verifies the candidate journal, and uses same-filesystem renames. Any replacement artifact found at startup is treated as uncertain and requires explicit recovery. A compaction failure before any artifact or primary mutation leaves the prior primary journal authoritative; failures after replacement begins fail closed.
 
-This is conservative at-most-once execution, not crash-proof exactly-once execution. OpenOS buffered writes and `flush()` do not establish hardware-backed `fsync` or transactional Minecraft operations. A crash can still leave physical state requiring operator reconciliation.
+The installed OpenComputers 1.8.8 filesystem callback returns no value for a successful close, so OpenOS `handle:close()` normally returns `nil` on success. An exception raised by the HDD-backed close path is meaningful; journal writes catch it, mark persistence uncertain, and prevent further autonomous execution. The same check applies while writing or verifying replacement journals. This is conservative at-most-once execution, not crash-proof exactly-once execution. Successful OpenOS `write()`, `flush()`, and `close()` calls do not establish hardware-backed `fsync` or transactional Minecraft operations. A crash can still leave physical state requiring operator reconciliation.
 
 ## Commissioning and Recovery
 
@@ -74,7 +75,7 @@ ocia-recover.lua reset-origin
 
 Type `RESET` only after physically verifying position and heading. The new epoch permanently makes physical packets from every prior epoch stale. Commissioning may clear incomplete journal replacement artifacts because the operator is explicitly establishing new trusted physical state; do not use it merely to make an error disappear.
 
-Legacy `drive.lua` retains `f/b/l/r/u/d [count]`, `status`, and `q`. Its packet remains broadcast for compatibility, but Wheatley accepts it only from the configured controller address. Before legacy physical movement, Wheatley durably invalidates autonomous pose and enters `recovery_required`. Restore the physical origin and commission a new epoch before autonomous movement resumes.
+Legacy `drive.lua` retains `f/b/l/r/u/d [count]`, `status`, and `q`. Its packet remains broadcast for compatibility, but Wheatley accepts it only from the configured controller address. Before legacy physical movement, Wheatley durably invalidates autonomous pose and enters `recovery_required`. If an unresolved physical request already exists, the manual record preserves its identity and unknown-outcome classification; manual movement does not reconcile it. Restore the physical origin and commission a new epoch before autonomous movement resumes.
 
 Both controller programs and the daemon close port 4242 only if they opened it. Concurrent controller programs still compete for replies on the same event queue and must not be run together.
 
@@ -157,7 +158,7 @@ docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
   sh -c 'apk add --no-cache lua5.3 >/dev/null && lua5.3 tests/run.lua'
 ```
 
-On 2026-10-30 the final hardening suite passed `26 tests, 6262 assertions, 0 failures`. It covers protocol rejection/correlation, epochs and sequence gaps, pose math, prepared/executing restart classification, matching and conflicting unresolved retries, retained and retired results, no-replay behavior, append and completion-write failures, corrupted journals, replacement artifacts, compaction faults, bounded scaling, transport timeouts, and legacy separation. These host mocks do not establish real OpenOS filesystem, modem, Robot API, memory, or timing behavior.
+On 2026-10-30 the edge-case hardening suite passed `29 tests, 6350 assertions, 0 failures`. It covers protocol rejection/correlation, epochs and sequence gaps, pose math, prepared/executing restart classification, matching and conflicting unresolved retries, manual recovery across restart, retained and retired results, no-replay behavior, append/flush/raised-close/completion failures, corrupted journals, replacement artifacts, compaction faults, bounded scaling, transport timeouts, and legacy separation. These host mocks do not establish real OpenOS filesystem, modem, Robot API, memory, or timing behavior.
 
 ## Supervised In-Game Acceptance
 
@@ -175,7 +176,7 @@ Use a clear, player-loaded test area. Keep Wheatley away from unsafe adjacent bl
 10. Exercise enough safe turns, or use a disposable configuration with the minimum allowed compaction threshold, to observe a generation increase. Restart the daemon and verify high water, pose, and retained duplicate behavior survive compaction. Restore production configuration afterward.
 11. With a safe receive-side harness, suppress one controller reply after a completed physical request. Expect controller certainty `unknown`; retry only the identical identifier and operation. Expect the cached outcome and no second physical action.
 12. Test an interrupted `prepared` record only through a safe hook. On restart, expect definite `failed / interrupted_before_execution`, `physical_outcome=not_started`, trusted unchanged pose, and no Robot API call.
-13. Test an interrupted `executing` record only through a disposable safe hook. On restart, expect `recovery_required`, untrusted unchanged recorded pose, and a matching retry with `physical_outcome_unknown`. Neither matching nor conflicting retries may invoke a Robot API call.
+13. Test an interrupted `executing` record only through a disposable safe hook. On restart, expect `recovery_required`, untrusted unchanged recorded pose, and a matching retry with `physical_outcome_unknown`. Neither matching nor conflicting retries may invoke a Robot API call. In the same disposable setup, perform an intentional legacy manual recovery movement, restart again, and retry the original identifier: it must remain `physical_outcome_unknown`, with no autonomous Robot API call; conflicting reuse must remain rejected.
 14. After any legacy physical movement or ambiguous test, manually restore Wheatley to the origin facing North, stop the daemon, inspect with `ocia-recover.lua show`, explicitly commission a new epoch, restart, and confirm status. A saved old-epoch request must then receive `stale_epoch`.
 
 Steps 1–9 are ordinary supervised acceptance. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until actual results are recorded in `SCRATCH.md` and the relevant `ISSUES.md` acceptance criteria are satisfied.
