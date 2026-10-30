@@ -1,2 +1,6 @@
 *.swp
 *.swo
+**/etc/ocia.cfg
+**/var/lib/ocia/*.state
+**/var/lib/ocia/*.state.bak
+**/var/lib/ocia/*.state.new

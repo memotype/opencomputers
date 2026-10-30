@@ -3,12 +3,18 @@
 local component = require("component")
 local computer = require("computer")
 local event = require("event")
+local configModule = require("ocia.config")
 
-local PORT = 4242
+local config = assert(configModule.load("/etc/ocia.cfg", "controller"))
+local PORT = config.port
 local modem = assert(component.modem, "Controller needs a wireless network card")
 assert(modem.isWireless(), "Controller modem is not wireless")
+assert(modem.address == config.controller_address,
+  "Configured controller address does not match this modem")
+local openedHere = false
 if not modem.isOpen(PORT) then
     assert(modem.open(PORT), "Cannot open modem port " .. PORT)
+    openedHere = true
 end
 
 local valid = { f=true, b=true, l=true, r=true, u=true, d=true, status=true }
@@ -19,7 +25,7 @@ while true do
   io.write("drive> ")
   local line = io.read()
   if not line or line == "q" or line == "quit" then
-    modem.close(PORT)
+    if openedHere then modem.close(PORT) end
     break
   end
 
@@ -39,7 +45,8 @@ while true do
         if timeLeft <= 0 then break end
         local _, _, sender, port, _, tag, reply, ok, detail, energy, capacity =
           event.pull(timeLeft, "modem_message")
-        if port == PORT and tag == "result" and reply == command then
+        if sender == config.robot_address and port == PORT
+            and tag == "result" and reply == command then
           print((ok and "OK" or "FAILED") .. ": " .. tostring(detail))
           print("Robot battery: " .. tostring(energy) .. "/" .. tostring(capacity))
           received = true

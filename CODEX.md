@@ -211,7 +211,7 @@ Wireless commands use a versioned request/reply protocol on port 4242. Construct
 
 Every state-changing request must include a unique request identifier. Replies must identify the protocol version, request, operation, success state, and relevant result data. The controller must validate the reply sender and correlation fields before changing authoritative state.
 
-Execution is transactional at the command level:
+Execution is journaled at the command level; physical Minecraft operations are not transactional:
 
 1. The controller records the next intended operation.
 2. The robot records the request as in progress.
@@ -222,7 +222,9 @@ Execution is transactional at the command level:
 
 Completed request identifiers may be replayed safely by returning their recorded results. An operation found in progress after a restart is ambiguous and requires reconciliation; it must not be executed again automatically.
 
-The existing interactive remote-driving workflow remains available for diagnosis and manual recovery. Protocol evolution must preserve that capability or provide an equivalent recovery path.
+Durable result retention must fail closed rather than silently forget an identifier that could be replayed. Retention limits and any future epoch or archive procedure are explicit operating constraints, not permission to repeat an old operation.
+
+The existing interactive remote-driving workflow remains available for diagnosis and manual recovery. Protocol evolution must preserve that capability or provide an equivalent recovery path. Because legacy movement has no request correlation, any manual physical command invalidates autonomous pose and requires an explicit origin/heading recalibration before autonomous execution resumes.
 
 ## Construction Safety and Verification
 

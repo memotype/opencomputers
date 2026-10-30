@@ -1,0 +1,9 @@
+# Copy to /etc/ocia.cfg on the controller and replace both placeholders.
+controller_address=CONTROLLER_MODEM_UUID
+robot_address=ROBOT_MODEM_UUID
+port=4242
+protocol_version=1
+timeout=8
+cache_size=256
+legacy_enabled=true
+state_path=/var/lib/ocia/robot.state

@@ -250,11 +250,13 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ### Milestone 1: Addressed and recoverable command transport
 
+**Status:** Implemented in the repository and host-tested on 2026-10-30; supervised OpenOS/Minecraft acceptance is pending. Do not treat this milestone as complete yet.
+
 **Goal:** Execute one correlated, bounded request without breaking manual control.
 
 **Prerequisites:** Current working `drive.lua` and `robotd.lua`.
 
-**Implementation:** Add protocol version, request ID, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, and a completed-result cache. Preserve legacy `(command, count)` handling for `drive.lua`.
+**Implementation:** Protocol version 1, request ID, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, a durable completed-result cache, relative pose, controller probe, and local recovery tool now exist in the disk snapshots. Legacy `(command, count)` handling remains available to `drive.lua`; legacy physical movement deliberately invalidates autonomous pose.
 
 **In-game test:** Send addressed status, turn, and one-step movement requests. Delay or duplicate a request and restart the daemon with the port already open.
 
@@ -262,7 +264,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 **Failure/recovery:** Timeout leaves the controller in an ambiguous state until status reconciliation. An interrupted in-flight physical request becomes `recovery_required` and is not replayed.
 
-**Unresolved dependencies:** Controller and robot modem UUIDs must be recorded.
+**Unresolved dependencies:** Controller and robot modem UUIDs must be recorded; the new daemon, file journal, actual modem behavior, duplicate replay, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). The fail-closed 256-result retention bound needs an epoch/archive design before long deployments can exceed it.
 
 ### Milestone 2: Durable pose, energy, and hardware primitives
 
@@ -427,18 +429,9 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ## Immediate Coding Milestone
 
-Implement Milestone 1 next: a compact versioned protocol and durable single-operation request state while keeping `drive.lua` functional. This is the smallest change that unlocks every autonomous capability and directly addresses the most dangerous existing ambiguity.
+Milestone 1 code is implemented and host-tested: 28 Lua 5.3 tests with 148 assertions pass. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
 
-The first coding slice should contain:
-
-1. Pure protocol validation and pose-transition modules with host-side tests.
-2. Configured modem addresses and port ownership.
-3. A controller status probe using request IDs.
-4. Robot-side compatible dispatch for status and one-step movement.
-5. Structured result fields for pose and energy.
-6. Completed-result replay and `recovery_required` for interrupted in-flight work.
-
-Do not add Geolyzer routing, RS calls, planning, or construction to this slice. Those features depend on this foundation and can be tested more safely after it is stable.
+After that acceptance passes, proceed to Milestone 2 hardware characterization and durable controller-side pose/session work. Do not add Geolyzer routing, RS calls, planning, or construction until the transport's actual OpenOS filesystem, modem, duplicate, timeout, and recovery behavior is recorded.
 
 ## Immediate In-Game Experiments
 

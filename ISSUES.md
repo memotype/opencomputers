@@ -15,91 +15,91 @@ This file tracks known defects, design risks, and unresolved operating constrain
 
 ### OCIA-001: Construction commands are broadcast
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Wireless transport
 - **Risk:** Every robot listening on port 4242 may execute a command intended for one robot.
-- **Current evidence:** The controller uses `modem.broadcast` for remote-driving commands.
+- **Current evidence:** The implemented OCIA transport uses `modem.send` to the configured robot and validates reply sender/local recipient in host tests. Legacy `drive.lua` intentionally remains broadcast for manual compatibility, and the robot restricts it to the configured controller. No two-robot in-game test has run.
 - **Required mitigation:** Send construction traffic to a configured robot modem address and reject replies from other senders.
 - **Resolution criteria:** A two-robot test demonstrates that only the addressed robot executes a deployment command.
 
 ### OCIA-002: Requests have no unique correlation identifier
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Wireless protocol
 - **Risk:** A stale, duplicated, or unrelated reply can be mistaken for the result of the current operation.
-- **Current evidence:** Requests contain only a command and count; replies are matched by command name.
+- **Current evidence:** Version 1 requests/replies include request, deployment, operation, and protocol identity. Host tests show stale replies and wrong senders are ignored. Legacy manual requests still contain only command/count and are not an autonomous state source.
 - **Required mitigation:** Add protocol version, request ID, operation name, and deployment ID fields and validate all correlation fields.
 - **Resolution criteria:** Delayed and duplicate replies cannot advance controller state incorrectly.
 
 ### OCIA-003: Lost acknowledgments make physical actions ambiguous
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Recovery and idempotency
 - **Risk:** Retrying a movement or turn after a lost reply may execute the action twice and corrupt the robot pose.
-- **Current evidence:** The controller times out without a request journal or robot-side result cache.
+- **Current evidence:** The robot snapshot now journals `prepared` then `executing`, durably retains completed results, returns identical duplicates without another physical call, and marks restart from `executing` as recovery-required. Host fault injection passes; OpenOS persistence and supervised lost-reply behavior are untested.
 - **Required mitigation:** Journal in-flight and completed requests on the robot, cache completed results, and enter recovery-required state after an interrupted in-flight action.
 - **Resolution criteria:** Duplicate completed requests return their original result without repeating the action, and interrupted requests are not replayed automatically.
 
 ### OCIA-004: Controller and robot do not track pose
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Navigation
 - **Risk:** Construction planning cannot reliably map relative blueprint coordinates to physical robot actions.
-- **Current evidence:** Neither script records position or orientation.
+- **Current evidence:** Pure relative-pose logic and robot-side durable pose exist and pass cardinal/turn/failure/ambiguity host tests. The controller probe validates and displays reported pose, but a durable authoritative controller deployment pose and in-game agreement tests do not exist yet.
 - **Required mitigation:** Define a relative coordinate system and update controller and robot pose only after successful operations.
 - **Resolution criteria:** Movement and turn tests produce matching controller and robot poses, including partial-operation failures.
 
 ### OCIA-005: Deployment progress is not durable
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Persistence
 - **Risk:** A program, computer, game, or host restart can lose the authoritative step and cause repeated or skipped construction.
-- **Current evidence:** All control state exists only in Lua process memory.
+- **Current evidence:** Robot request phase, pose, and completed results now use a temporary-file/backup/rename store with validation and fail-closed behavior. Host restart/failure tests pass. Controller deployment state is not implemented, and host tests cannot prove OpenOS or world-save crash durability.
 - **Required mitigation:** Persist versioned controller deployment state and robot execution state using replace-safe writes.
 - **Resolution criteria:** Restart tests either resume from an unambiguous checkpoint or stop with an explicit recovery requirement.
 
 ### OCIA-006: Robot modem port opening is not restart-safe
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Robot daemon
 - **Risk:** Restarting `robotd.lua` can fail when port 4242 is already open.
-- **Current evidence:** The robot unconditionally asserts that `modem.open(4242)` returns true.
+- **Current evidence:** The repository daemon now checks `isOpen`, records whether it opened the port, and closes only its own open action. Repeated restart has not yet been exercised in OpenOS.
 - **Required mitigation:** Check `modem.isOpen` before opening and define whether the daemon owns and closes the port.
 - **Resolution criteria:** The daemon can be stopped and restarted repeatedly without a port-open assertion failure.
 
 ### OCIA-007: Controller modem port ownership is unclear
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Controller transport
 - **Risk:** `drive.lua` closes port 4242 on exit even when another program originally opened it.
-- **Current evidence:** The program conditionally opens the port but closes it unconditionally.
+- **Current evidence:** Repository `drive.lua` and `ociactl.lua` now track `openedHere` and close only when they opened the port. Concurrent programs still consume a shared event queue and must not be run together; in-game coexistence acceptance is pending.
 - **Required mitigation:** Record whether the program opened the port and close it only when it owns that action, or centralize modem ownership.
 - **Resolution criteria:** Exiting the manual driver does not disrupt another controller service using port 4242.
 
 ### OCIA-008: Robot hardware calls can terminate the daemon
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Error handling
 - **Risk:** An unexpected OpenComputers API exception can stop command processing and leave the controller waiting.
-- **Current evidence:** Robot actions are invoked without a protected call or top-level recovery boundary.
+- **Current evidence:** New-protocol dispatch and Robot calls use protected calls. An injected exception leaves the executing journal, untrusted pose, and recovery-required result in host tests. Legacy calls are also protected, but actual component exceptions and daemon continuity remain untested in game.
 - **Required mitigation:** Wrap dispatch and hardware calls with bounded error handling, record failures, and keep the daemon observable.
 - **Resolution criteria:** Injected operation errors produce failure replies and do not silently terminate the daemon.
 
 ### OCIA-009: Any wireless sender can command the robot
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Command authorization
 - **Risk:** Another computer within range can move the robot or change the world.
-- **Current evidence:** The robot accepts any string command received on port 4242.
+- **Current evidence:** Repository `robotd.lua` accepts both OCIA and legacy packets only from the configured controller address and logs other senders. This is routing protection, not authentication, and awaits an in-game foreign-sender test.
 - **Required mitigation:** Configure an allowed controller address and reject construction traffic from other senders. Define an intentional pairing or recovery procedure.
 - **Resolution criteria:** Commands from an unconfigured modem are logged and ignored.
 
 ### OCIA-010: Multi-step commands have coarse acknowledgments
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Execution granularity
 - **Risk:** A command such as `f 8` can partially succeed, but controller state depends on parsing a human-readable error string.
-- **Current evidence:** The robot sends one reply after the movement loop.
+- **Current evidence:** OCIA autonomous requests expose only one-block movement and one-turn operations with structured results. Legacy manual commands retain counts 1–8 and coarse replies; they invalidate autonomous pose before physical execution. In-game pose/result verification is pending.
 - **Required mitigation:** Use one physical operation per construction request or return structured completed-step data.
 - **Resolution criteria:** Controller pose is updated from structured results without parsing prose.
 
@@ -168,10 +168,10 @@ This file tracks known defects, design risks, and unresolved operating constrain
 
 ### OCIA-020: Network packet limits constrain protocol design
 
-- **Status:** Open
+- **Status:** In progress
 - **Area:** Wireless protocol
 - **Risk:** Large plans or highly structured replies can exceed OpenComputers packet-size or packet-part limits.
-- **Current evidence:** Default OpenComputers configuration limits packets to eight data parts and 8192 bytes.
+- **Current evidence:** Default OpenComputers configuration limits packets to eight data parts and 8192 bytes. Protocol version 1 uses exactly eight parts and rejects encoded request/result payloads over 4096 bytes in host tests. Actual installed packet behavior remains untested.
 - **Required mitigation:** Send bounded single-operation messages, serialize compact argument/result payloads, and validate payload size before transmission.
 - **Resolution criteria:** Maximum supported requests remain within configured limits and oversized requests fail locally with a clear error.
 
@@ -300,6 +300,15 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Current evidence:** The conduit-powered Charger directly north of Wheatley's resting pose restored him only after its Lever activated it. The dock geometry is observed, but autonomous return, alignment, energy-increase detection, charge waiting, and resume have not been tested.
 - **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
 - **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
+
+### OCIA-036: Completed-request retention has a finite safe capacity
+
+- **Status:** Open
+- **Area:** Protocol retention
+- **Risk:** Forgetting an old request ID can permit a delayed duplicate to execute again, while retaining every result forever can exhaust Wheatley's limited memory or disk.
+- **Current evidence:** Milestone 1 durably retains up to 256 completed requests and fails closed when full. It never automatically evicts an ID. This is safe for bounded acceptance and early prototypes but cannot support an indefinitely long deployment.
+- **Required mitigation:** Define a durable protocol epoch or execution-session lifecycle that makes earlier IDs unambiguously stale before archiving their results. Measure retained-state size on OpenOS and keep a compact audit trail. Never clear the cache merely to continue execution.
+- **Resolution criteria:** An in-game test rotates to a new durable epoch only through an explicit safe boundary; packets from the prior epoch are rejected, current duplicates remain suppressed, and state remains within measured memory/disk limits.
 
 ## Resolved Issues
 

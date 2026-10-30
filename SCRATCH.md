@@ -13,7 +13,7 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Controller program: `home/drive.lua`
 - Robot program: `home/robotd.lua`
 - Wireless port: `4242`
-- No construction, blueprint, pose, persistence, or Refined Storage orchestration code has been implemented.
+- Milestone 1 command transport, relative-pose math, and robot execution journaling are implemented in the repository snapshots and host-tested. They have not yet been deployed or verified in Minecraft.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
@@ -132,13 +132,31 @@ This asymmetric geometry is a useful fixed fixture for calibrating Geolyzer arra
 - `q` or `quit` exits the driver.
 - Movement accepts an optional count from 1 through 8, such as `f 4`.
 
-`robotd.lua` listens on port 4242, executes the movement through the OpenComputers Robot API, and returns an acknowledgment containing battery status. The current request is `(command, count)`. The current reply is `("result", command, ok, detail, energy, capacity)`.
+The legacy path remains `(command, count)` with reply `("result", command, ok, detail, energy, capacity)`. The repository version of `robotd.lua` now also supports the isolated OCIA version 1 protocol, addressed single-operation dispatch, durable duplicate suppression, and explicit recovery state. These changes are host-tested but not yet demonstrated in Minecraft.
 
 This path has been tested successfully in Minecraft. For example, `drive> f 4` returned `OK: OK`, reported battery state, and physically moved the robot four blocks.
 
-The controller originally asserted an unconditional `modem.open(4242)`, which failed when the port was already open. `drive.lua` now checks `modem.isOpen(4242)` first and closes the port on normal shutdown. Port ownership is still tracked as OCIA-007, and the equivalent restart guard is still absent from `robotd.lua` under OCIA-006.
+The controller originally asserted an unconditional `modem.open(4242)`, which failed when the port was already open. Repository versions of `drive.lua`, `ociactl.lua`, and `robotd.lua` now check `modem.isOpen(4242)` and close the port only when that process opened it. The robot-side behavior and controller coexistence still require in-game acceptance under OCIA-006 and OCIA-007.
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
+
+### Milestone 1 implementation awaiting in-game acceptance
+
+Implemented snapshot paths:
+
+- Shared `lib/ocia/config.lua`, `pose.lua`, and `protocol.lua` on both disks.
+- Controller `lib/ocia/transport.lua`, `home/ociactl.lua`, and compatible `home/drive.lua`.
+- Robot `lib/ocia/state.lua`, `executor.lua`, `legacy.lua`, `home/robotd.lua`, and `home/ocia-recover.lua`.
+- Address placeholders and runtime limits in `etc/ocia.cfg.example` on both disks.
+- Pure host suite in `tests/run.lua`; operational contract and supervised procedure in [MILESTONE1.md](MILESTONE1.md).
+
+Protocol version 1 uses eight modem parts and a bounded encoded payload. It supports read-only `status` and one-operation turns/moves. The controller unicasts to the configured robot, validates the reply sender and correlation fields, and reports `succeeded`, `failed`, or `unknown`; a timeout is `unknown`.
+
+Before a physical call, Wheatley persists `prepared` and then `executing`. A completed request and result are retained durably. Duplicate content returns the cached result; the same ID with different content is rejected. Restart from `prepared` becomes definite non-execution. Restart from `executing`, an operation exception, or failure to persist completion becomes `recovery_required` with untrusted pose. This is conservative at-most-once behavior, not a claim of crash-proof exactly-once execution.
+
+The default completed-result capacity is 256. It does not evict automatically: a full cache rejects new requests so an old ID cannot silently become executable again. A safe long-running retention/epoch policy remains future work before deployments can exceed this bound.
+
+Host result on 2026-10-30: Lua 5.3 syntax checks passed and `tests/run.lua` passed 28 tests / 148 assertions in an Alpine 3.20 container. No in-game result is implied.
 
 ### OpenOS REPL behavior
 
@@ -525,6 +543,8 @@ Goal: make future changes reviewable without disturbing the known working script
 
 Related risks: OCIA-005, OCIA-006, OCIA-007.
 
+Implementation status: the repository baseline exists and `.gitignore` excludes machine-local OCIA configuration and runtime request-state files. The UUID disk snapshots remain the canonical source for this milestone; the selective deployment procedure is documented in [MILESTONE1.md](MILESTONE1.md).
+
 ### Phase 1: Introduce a compatible protocol layer
 
 Goal: provide correlated, addressed requests while retaining manual driving.
@@ -540,6 +560,8 @@ Goal: provide correlated, addressed requests while retaining manual driving.
 - Add host-side tests for protocol encoding, validation, and malformed payload rejection.
 
 Related risks: OCIA-001, OCIA-002, OCIA-006, OCIA-007, OCIA-009, OCIA-010, OCIA-020.
+
+Implementation status: repository code and host tests are complete for the Milestone 1 subset. Modem UUID configuration and supervised in-game acceptance remain pending.
 
 ### Phase 2: Add robot execution state and safe primitives
 
@@ -557,6 +579,8 @@ Goal: turn `robotd.lua` into a recoverable execution agent.
 - Test pose transitions and journal logic on the host; test robot APIs in Minecraft.
 
 Related risks: OCIA-003, OCIA-004, OCIA-005, OCIA-008, OCIA-010, OCIA-014.
+
+Implementation status: the Milestone 1 subset—relative pose, physical-request journal, duplicate cache, protected movement dispatch, and local origin reset—is host-tested. Controller deployment checkpoints, hardware primitives, and all in-game acceptance remain pending for later work.
 
 ### Phase 3: Implement verified dirt placement
 
@@ -714,13 +738,13 @@ Related risks: OCIA-019, OCIA-021.
 
 ## Immediate Next Work
 
-The next software implementation session should implement Milestone 1 in [MVP_PLAN.md](MVP_PLAN.md) while preserving the working manual driver:
+Deploy and accept Milestone 1 using [MILESTONE1.md](MILESTONE1.md):
 
-1. Define protocol version 1 and configuration files.
-2. Add tests for the pure protocol logic.
-3. Update `robotd.lua` with compatible dispatch and safe port handling.
-4. Add a minimal controller probe that unicasts `status` and validates the correlated reply.
-5. Test legacy `drive.lua` and the new status probe in Minecraft before adding physical construction operations.
+1. Discover and record the real controller and robot modem UUIDs in `/etc/ocia.cfg` on both machines.
+2. Synchronize only the listed snapshot application files while the programs are stopped.
+3. Start `robotd.lua`, verify restart-safe port handling, then run the default read-only `ociactl.lua` status probe.
+4. Confirm legacy `drive.lua status`, one supervised turn, one clear-area movement, duplicate replay, lost-reply behavior, and restart recovery.
+5. Record actual results before changing Milestone 1 or related issues to mitigated/complete.
 
 The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
@@ -741,8 +765,9 @@ For charging, measure robot energy at the expected charging pose with the Lever 
 ## Handoff Notes
 
 - Existing source and unrelated user changes must be preserved carefully.
-- The controller-side port-open guard is present and known to work.
-- The same guard is absent from the robot daemon.
+- Repository code now has guarded, owned port handling on both endpoints; only the older controller guard has prior in-game evidence, so the new daemon behavior remains pending.
+- Legacy physical driving intentionally marks autonomous pose untrusted. Return to origin facing North and use the local recovery tool before autonomous work resumes.
+- Completed request retention is fail-closed at 256 records; no safe cache rotation or protocol-epoch procedure exists yet.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
 - Detailed item-stack inspection requires the now-installed Inventory Controller Upgrade; its operational methods remain untested.
 - The Inventory Controller Upgrade does not identify terrain blocks.
