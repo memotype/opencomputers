@@ -1,0 +1,8 @@
+return {
+  world_save = "/path/to/minecraft/saves/World Name",
+
+  disks = {
+    controller = "CONTROLLER_DISK_UUID",
+    robot = "ROBOT_DISK_UUID",
+  },
+}

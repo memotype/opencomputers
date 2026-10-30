@@ -1,6 +1,10 @@
 *.swp
 *.swo
+deploy.local.lua
+.deploy-backups/
 **/etc/ocia.cfg
 **/var/lib/ocia/*.state
 **/var/lib/ocia/*.state.bak
 **/var/lib/ocia/*.state.new
+**/var/lib/ocia/*.state.old
+**/var/lib/ocia/*.state.switch

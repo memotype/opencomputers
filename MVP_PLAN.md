@@ -256,7 +256,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 **Prerequisites:** Current working `drive.lua` and `robotd.lua`.
 
-**Implementation:** Protocol version 1, execution epochs and monotonic physical sequences, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, an append-only execution journal with bounded recent results and compaction, relative pose, controller probe, and explicit local commissioning/recovery now exist in the disk snapshots. Legacy `(command, count)` handling remains available to `drive.lua`; legacy physical movement deliberately invalidates autonomous pose.
+**Implementation:** Protocol version 1, execution epochs and monotonic physical sequences, deployment ID, configured controller/robot addresses, sender validation, single-step operations, protected dispatch, restart-safe port ownership, an append-only execution journal with bounded recent results and compaction, relative pose, controller probe, and explicit local commissioning/recovery now exist in the logical machine source trees. Legacy `(command, count)` handling remains available to `drive.lua`; legacy physical movement deliberately invalidates autonomous pose.
 
 **In-game test:** Send addressed status, turn, and one-step movement requests. Delay or duplicate a request and restart the daemon with the port already open.
 
@@ -429,7 +429,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ## Immediate Coding Milestone
 
-Milestone 1 code is implemented and host-tested: 26 Lua 5.3 tests with 6262 assertions pass after the final hardening pass on 2026-10-30. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
+Milestone 1 code is implemented and host-tested: 29 Lua 5.3 tests with 6350 assertions pass on 2026-10-30. The role-based source layout and host deployment installer add a separate 16-test fixture suite; they do not change the milestone protocol requirements. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
 
 After that acceptance passes, proceed to Milestone 2 hardware characterization and durable controller-side pose/session work. Do not add Geolyzer routing, RS calls, planning, or construction until the transport's actual OpenOS filesystem, modem, duplicate, timeout, and recovery behavior is recorded.
 

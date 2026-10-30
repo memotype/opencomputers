@@ -1,7 +1,7 @@
 -- Host-side Milestone 1 hardening tests. Run from the repository root with Lua 5.3.
 package.path = table.concat({
-  "./d4d31815-680c-4fb8-a846-ee3c6d49be69/lib/?.lua",
-  "./7762455c-2ffb-4307-ac41-4faa2ae6a3a1/lib/?.lua",
+  "./machines/robot/lib/?.lua",
+  "./machines/controller/lib/?.lua",
   package.path
 }, ";")
 

@@ -113,12 +113,53 @@ Configuration rejects placeholders, unknown keys, invalid bounds, and a local mo
 
 ## Safe Repository-to-OpenOS Deployment
 
-The repository snapshots are canonical; live OpenOS disks are deployment targets. Stop `robotd.lua`, `drive.lua`, and `ociactl.lua` before replacing files. Never replace Wheatley's daemon during a physical request. Stop Minecraft, or otherwise establish that no OpenOS process is using the target files, before copying.
+The logical source trees under `machines/controller` and `machines/robot` are canonical; live OpenOS disks are deployment targets. `deploy.lua` is a Lua 5.3 host utility and is never installed on OpenOS. It requires LuaFileSystem (`lua-filesystem` on Ubuntu, or `lua-filesystem` in Alpine).
 
-Synchronize only these application paths:
+```sh
+sudo apt install lua5.3 lua-filesystem
+```
+
+For initial local setup, copy the template and fill in the actual world-save path and virtual HDD UUIDs:
+
+```sh
+cp deploy.local.lua.example deploy.local.lua
+edit deploy.local.lua
+```
+
+```lua
+return {
+  world_save = "/path/to/minecraft/saves/World Name",
+  disks = {
+    controller = "CONTROLLER_DISK_UUID",
+    robot = "ROBOT_DISK_UUID",
+  },
+}
+```
+
+`deploy.local.lua` is Git-ignored. HDD UUIDs select directories below `<world_save>/opencomputers`; they are not modem addresses. Wireless addresses remain machine-specific values in the live `/etc/ocia.cfg` files and are neither discovered nor changed by the installer.
+
+The installer defaults to a nondestructive plan for both machines:
+
+```sh
+lua5.3 deploy.lua
+lua5.3 deploy.lua --target controller
+lua5.3 deploy.lua --target robot
+lua5.3 deploy.lua --target all
+```
+
+Review `CREATE`, `UPDATE`, and `UNCHANGED` lines, then apply exactly the selected manifest with:
+
+```sh
+lua5.3 deploy.lua --apply
+lua5.3 deploy.lua --target controller --apply
+lua5.3 deploy.lua --target robot --apply
+lua5.3 deploy.lua --target all --apply
+```
+
+The manifest contains only these paths:
 
 ```text
-controller snapshot -> live controller HDD
+machines/controller -> live controller HDD
   /home/drive.lua
   /home/ociactl.lua
   /lib/ocia/config.lua
@@ -127,7 +168,7 @@ controller snapshot -> live controller HDD
   /lib/ocia/transport.lua
   /etc/ocia.cfg.example
 
-robot snapshot -> live robot HDD
+machines/robot -> live robot HDD
   /home/robotd.lua
   /home/ocia-recover.lua
   /lib/ocia/config.lua
@@ -139,19 +180,25 @@ robot snapshot -> live robot HDD
   /etc/ocia.cfg.example
 ```
 
-Do not copy repository runtime state, do not overwrite `/etc/ocia.cfg`, and do not synchronize whole HDD trees blindly. The journal directory is created by commissioning when needed. `filesystem.bufferChanges=false` permits external file changes to become visible, but a successful host copy does not prove OpenOS persistence behavior.
+Files with identical bytes are skipped. Before replacing an existing file, the installer preserves its original bytes and relative path under `.deploy-backups/<run>/<role>/`. It writes and flushes a uniquely named temporary file beside the destination, renames it over the destination, and reads the installed file back for verification. A failure stops later changes and reports any files already installed. Backups are not an automatic runtime rollback mechanism, and a multi-file deployment is not atomic.
+
+The installer never recursively synchronizes or deletes HDD content. It does not target `/etc/ocia.cfg`, `/var/lib/ocia/robot.state`, any journal replacement artifact, or any unlisted file. Missing HDD directories are errors and are not created. The journal directory remains owned by commissioning/runtime code. After applying, review the completed `INSTALLED` lines and backup location, then run another dry run; every selected entry should report `UNCHANGED`.
+
+Hot deployment is explicitly supported: Minecraft and OpenOS programs may remain running. The installer does not inspect host processes, stop programs, restart daemons, or reboot computers. An active Lua process may retain already loaded modules, so restart `robotd.lua`, `drive.lua`, or `ociactl.lua` manually when the changed code must take effect. Avoid intentionally deploying during a physical robot operation: individual files cannot be partially copied, but a process loading modules during a multi-file apply can observe a mixture of versions. `filesystem.bufferChanges=false` permits external file changes to become visible, but successful host verification does not prove OpenOS runtime behavior.
 
 For a first deployment or any deliberate pose recovery:
 
-1. Put Wheatley at the origin facing North.
-2. Configure `/etc/ocia.cfg` on both computers.
-3. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.
-4. Start `robotd.lua`.
-5. Run `ociactl.lua` with no arguments before any physical command.
+1. Populate `deploy.local.lua`, run the all-target dry run, review it, and apply it.
+2. Run the dry run again and verify every manifest entry is `UNCHANGED`.
+3. Configure `/etc/ocia.cfg` on both computers without confusing modem addresses with HDD UUIDs.
+4. Put Wheatley at the origin facing North and stop `robotd.lua` before commissioning.
+5. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.
+6. Start `robotd.lua`.
+7. Run `ociactl.lua` with no arguments before any physical command.
 
 ## Host Test
 
-The suite requires Lua 5.3. The verified repository command is:
+The Milestone 1 suite requires Lua 5.3. The verified repository command is:
 
 ```sh
 docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
@@ -159,6 +206,15 @@ docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
 ```
 
 On 2026-10-30 the edge-case hardening suite passed `29 tests, 6350 assertions, 0 failures`. It covers protocol rejection/correlation, epochs and sequence gaps, pose math, prepared/executing restart classification, matching and conflicting unresolved retries, manual recovery across restart, retained and retired results, no-replay behavior, append/flush/raised-close/completion failures, corrupted journals, replacement artifacts, compaction faults, bounded scaling, transport timeouts, and legacy separation. These host mocks do not establish real OpenOS filesystem, modem, Robot API, memory, or timing behavior.
+
+The deployment fixture suite additionally requires LuaFileSystem:
+
+```sh
+docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
+  sh -c 'apk add --no-cache lua5.3 lua-filesystem >/dev/null && lua5.3 tests/deploy_test.lua'
+```
+
+On 2026-10-30 it passed `16 tests, 68 assertions, 0 failures`. It uses disposable temporary worlds only and covers validation, dry-run purity, target selection, create/update/unchanged behavior, backups, protected state, idempotence, unsafe paths, nonzero CLI errors, and staged failure handling.
 
 ## Supervised In-Game Acceptance
 

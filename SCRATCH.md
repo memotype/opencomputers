@@ -6,14 +6,13 @@ The evergreen project purpose, architecture, and engineering constraints are def
 
 ## Current State
 
-- Repository: `/home/isaac/dev/opencomputers`
-- The repository contains snapshots of two OpenOS disks and is under Git version control.
-- Controller disk: `7762455c-2ffb-4307-ac41-4faa2ae6a3a1`
-- Robot disk: `d4d31815-680c-4fb8-a846-ee3c6d49be69`
-- Controller program: `home/drive.lua`
-- Robot program: `home/robotd.lua`
+- The repository contains project-owned OpenOS source trees organized as `machines/controller` and `machines/robot`; it no longer treats world-specific full HDD snapshots as source.
+- Controller program: `machines/controller/home/drive.lua`
+- Robot program: `machines/robot/home/robotd.lua`
 - Wireless port: `4242`
-- Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented in the repository snapshots and host-tested. They have not yet been deployed or verified in Minecraft.
+- Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented in the logical machine source trees and host-tested. They have not yet been deployed or verified in Minecraft.
+- `deploy.lua` now provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, verifies installed bytes, and never targets runtime configuration or journal state.
+- `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save and its two HDD UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
@@ -23,10 +22,7 @@ The evergreen project purpose, architecture, and engineering constraints are def
 
 - Physical host: Ubuntu 26.04 with KDE Plasma.
 - Development tools: VS Code and Codex.
-- Minecraft instance: `/home/isaac/.ftba/instances/the 1122 pack perfectly complex`
-- World save: `/home/isaac/.ftba/instances/the 1122 pack perfectly complex/saves/The 1_12_2 Pack`
-- Live controller HDD: `/home/isaac/.ftba/instances/the 1122 pack perfectly complex/saves/The 1_12_2 Pack/opencomputers/7762455c-2ffb-4307-ac41-4faa2ae6a3a1`
-- Live robot HDD: `/home/isaac/.ftba/instances/the 1122 pack perfectly complex/saves/The 1_12_2 Pack/opencomputers/d4d31815-680c-4fb8-a846-ee3c6d49be69`
+- The local Minecraft world and controller/robot HDD UUIDs are intentionally not recorded here; `deploy.local.lua` supplies them for each developer.
 - OpenComputers virtual HDDs are directories inside the Minecraft world save and can be edited from Linux.
 - OpenComputers configuration has `bufferChanges=false`.
 - OpenComputers configuration has `allowItemStackInspection=true`, permitting Inventory Controller stack descriptions.
@@ -142,7 +138,7 @@ Do not replace or substantially rewrite this working control path without inspec
 
 ### Milestone 1 implementation awaiting in-game acceptance
 
-Implemented snapshot paths:
+Implemented logical source paths:
 
 - Shared `lib/ocia/config.lua`, `pose.lua`, and `protocol.lua` on both disks.
 - Controller `lib/ocia/transport.lua`, `home/ociactl.lua`, and compatible `home/drive.lua`.
@@ -161,6 +157,8 @@ Full results are bounded by `recent_results` (default 32, maximum 64). Older res
 Host result on 2026-10-30: the prior hardening pass ended at 26 tests / 6262 assertions. This edge-case pass began with the same clean baseline. Adding the manual-recovery regression before the implementation fix reproduced the concern as 1 failure in 28 tests / 6280 assertions: the post-restart retry returned `retired_request`. After correction and regression expansion, `tests/run.lua` passed 29 tests / 6350 assertions in an Alpine 3.20 Lua 5.3 container.
 
 The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` was inspected directly for close semantics. The filesystem component's successful `close` callback returns no values, and the OpenOS buffered handle therefore normally returns `nil` on success; `nil` cannot be treated as a failure indicator. The HDD-backed handle calls `RandomAccessFile.close()`, and a raised close exception propagates through the component invocation. Journal writes now catch that exceptional path and fail closed as an uncertain write; journal verification also rejects a raised close error. Host fault tests cover close exceptions at `prepared`, `executing`, `completed`, and compaction boundaries. This handling does not provide `fsync`, power-loss durability, or proof of real OpenOS behavior, which remain in-game acceptance concerns.
+
+Deployment installer result on 2026-10-30: `tests/deploy_test.lua` passes 16 tests / 68 assertions in an Alpine 3.20 Lua 5.3 container with LuaFileSystem. Fixtures cover configuration and target validation, dry-run purity, initial and selective installs, byte-based updates, backups, preservation of runtime/unlisted files, idempotence, unsafe paths, nonzero CLI errors, and injected staging/backup/replacement failures. No live world was used.
 
 ### OpenOS REPL behavior
 
@@ -413,7 +411,7 @@ The following values still need to be recorded when required by implementation:
 - Deployment origins, headings, and site coordinates.
 - Initial controller-side deployment submission interface.
 
-The UUID-named repository directories identify the captured disk trees; do not assume they are modem addresses or live deployment paths.
+HDD UUIDs in `deploy.local.lua` identify host filesystem directories only. They are not wireless modem addresses; the latter remain in each machine's `/etc/ocia.cfg`.
 
 ## Current Design Direction
 
@@ -539,15 +537,14 @@ Construction may verify while resources remain discrepant or the return fails. N
 
 Goal: make future changes reviewable without disturbing the known working scripts.
 
-- Record the existing disk snapshots as the baseline once the user is ready to create Git history.
-- Add a focused `.gitignore` for runtime checkpoint files, logs, and host-generated temporary files.
-- Decide whether the UUID disk trees remain the canonical deployable layout or are generated from a separate `src` tree.
-- Document the safe synchronization command from repository source to each Minecraft HDD target.
+- Preserve project-owned application files under logical controller and robot roles.
+- Keep machine-local deployment mapping, backups, runtime configuration, and runtime state out of Git.
+- Deploy only an explicit application manifest with dry-run planning, backups, staged replacement, and verification.
 - Keep the confirmed installed mod versions recorded with the runtime environment when the pack changes.
 
 Related risks: OCIA-005, OCIA-006, OCIA-007.
 
-Implementation status: the repository baseline exists and `.gitignore` excludes machine-local OCIA configuration and runtime request-state files. The UUID disk snapshots remain the canonical source for this milestone; the selective deployment procedure is documented in [MILESTONE1.md](MILESTONE1.md).
+Implementation status: complete. The semantic `machines/` trees are canonical, `.gitignore` excludes deployment-local data and runtime state, and the tested selective installer procedure is documented in [MILESTONE1.md](MILESTONE1.md).
 
 ### Phase 1: Introduce a compatible protocol layer
 
@@ -744,9 +741,9 @@ Related risks: OCIA-019, OCIA-021.
 
 Deploy and accept Milestone 1 using [MILESTONE1.md](MILESTONE1.md):
 
-1. Discover and record the real controller and robot modem UUIDs in `/etc/ocia.cfg` on both machines.
-2. Synchronize only the listed snapshot application files while the programs are stopped.
-3. With Wheatley physically at the origin facing North and the daemon stopped, inspect state and explicitly run `ocia-recover.lua reset-origin` to create the first execution epoch.
+1. Copy `deploy.local.lua.example` to ignored `deploy.local.lua`, set the world save and HDD UUID mapping, and run the default dry run followed by an explicit `--apply` after reviewing the plan.
+2. Discover and record the real controller and robot modem UUIDs in `/etc/ocia.cfg` on both machines; these are separate from the HDD UUIDs in the host deployment file.
+3. Manually restart affected OpenOS programs after deployment as needed. With Wheatley physically at the origin facing North and the daemon stopped, inspect state and explicitly run `ocia-recover.lua reset-origin` to create the first execution epoch.
 4. Start `robotd.lua`, verify restart-safe port handling, then run the default read-only `ociactl.lua` status probe and record epoch/high-water/journal diagnostics.
 5. Confirm legacy `drive.lua status`, one automatically numbered supervised turn, one clear-area movement, cached duplicate and conflicting reuse behavior, and compaction/restart behavior.
 6. Use only safe harnesses for lost-reply, interrupted-`prepared`, interrupted-`executing`, and manual recovery after an ambiguous execution. Verify the unresolved request remains unknown across the manual record and another restart until explicit epoch recommissioning. Record actual results before changing Milestone 1 or related issues to mitigated/complete.
