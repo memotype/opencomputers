@@ -1,4 +1,4 @@
-# Copy to /etc/ocia.cfg on Wheatley and replace both placeholders.
+# Rendered by deploy.lua for Wheatley; keep local identities in deploy.local.lua.
 controller_address=CONTROLLER_MODEM_UUID
 robot_address=ROBOT_MODEM_UUID
 port=4242

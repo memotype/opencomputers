@@ -87,12 +87,7 @@ On each OpenOS computer, obtain the full local wireless modem address with `comp
 lua -e 'print(require("component").modem.address)'
 ```
 
-Do not use a UUID-named HDD directory as a modem address. Copy the supplied example to `/etc/ocia.cfg` on both machines and set the same real controller and robot addresses:
-
-```sh
-cp /etc/ocia.cfg.example /etc/ocia.cfg
-edit /etc/ocia.cfg
-```
+Do not use a UUID-named HDD directory as a modem address. Record both full modem addresses in the Git-ignored host `deploy.local.lua`; the installer renders the role-specific `etc/ocia.cfg.example` templates and installs `/etc/ocia.cfg` on both machines. Direct edits to an installed configuration are replaced, with backup, on the next apply when they differ from the generated file.
 
 Current keys and defaults are:
 
@@ -119,7 +114,7 @@ The logical source trees under `machines/controller` and `machines/robot` are ca
 sudo apt install lua5.3 lua-filesystem
 ```
 
-For initial local setup, copy the template and fill in the actual world-save path and virtual HDD UUIDs:
+For initial local setup, copy the template and fill in the actual world-save path, virtual HDD UUIDs, and wireless modem UUIDs:
 
 ```sh
 cp deploy.local.lua.example deploy.local.lua
@@ -133,10 +128,14 @@ return {
     controller = "CONTROLLER_DISK_UUID",
     robot = "ROBOT_DISK_UUID",
   },
+  modems = {
+    controller = "CONTROLLER_MODEM_UUID",
+    robot = "ROBOT_MODEM_UUID",
+  },
 }
 ```
 
-`deploy.local.lua` is Git-ignored. HDD UUIDs select directories below `<world_save>/opencomputers`; they are not modem addresses. Wireless addresses remain machine-specific values in the live `/etc/ocia.cfg` files and are neither discovered nor changed by the installer.
+`deploy.local.lua` is Git-ignored. HDD UUIDs select directories below `<world_save>/opencomputers`; modem UUIDs identify the wireless components inside Minecraft. The installer does not discover either identity dynamically.
 
 The installer defaults to a nondestructive plan for both machines:
 
@@ -167,6 +166,7 @@ machines/controller -> live controller HDD
   /lib/ocia/protocol.lua
   /lib/ocia/transport.lua
   /etc/ocia.cfg.example
+  /etc/ocia.cfg (generated)
 
 machines/robot -> live robot HDD
   /home/robotd.lua
@@ -178,23 +178,28 @@ machines/robot -> live robot HDD
   /lib/ocia/protocol.lua
   /lib/ocia/state.lua
   /etc/ocia.cfg.example
+  /etc/ocia.cfg (generated)
 ```
 
-Files with identical bytes are skipped. Before replacing an existing file, the installer preserves its original bytes and relative path under `.deploy-backups/<run>/<role>/`. It writes and flushes a uniquely named temporary file beside the destination, renames it over the destination, and reads the installed file back for verification. A failure stops later changes and reports any files already installed. Backups are not an automatic runtime rollback mechanism, and a multi-file deployment is not atomic.
+Each generated configuration comes from its role's version-controlled template. Exactly one `CONTROLLER_MODEM_UUID` and one `ROBOT_MODEM_UUID` are replaced with the local values; all other defaults, comments, and formatting remain template-owned. Missing, duplicate, unexpected, or unresolved modem placeholders fail preflight before writes.
 
-The installer never recursively synchronizes or deletes HDD content. It does not target `/etc/ocia.cfg`, `/var/lib/ocia/robot.state`, any journal replacement artifact, or any unlisted file. Missing HDD directories are errors and are not created. The journal directory remains owned by commissioning/runtime code. After applying, review the completed `INSTALLED` lines and backup location, then run another dry run; every selected entry should report `UNCHANGED`.
+Files with identical bytes are skipped. Before replacing an existing file—including a manually configured `/etc/ocia.cfg`—the installer preserves its original bytes and relative path under `.deploy-backups/<run>/<role>/`. It writes and flushes a uniquely named temporary file beside the destination, renames it over the destination, and reads the installed file back for verification. A failure stops later changes and reports any files already installed. Backups are not an automatic runtime rollback mechanism, and a multi-file deployment is not atomic.
+
+The installer never recursively synchronizes or deletes HDD content. Its only managed runtime configuration is the exact generated `/etc/ocia.cfg` entry. It does not target `/var/lib/ocia/robot.state`, any journal replacement artifact, or any unlisted file. Missing HDD directories are errors and are not created. The journal directory remains owned by commissioning/runtime code. After applying, review the completed `INSTALLED` lines and backup location, then run another dry run; all 18 entries should report `UNCHANGED`.
 
 Hot deployment is explicitly supported: Minecraft and OpenOS programs may remain running. The installer does not inspect host processes, stop programs, restart daemons, or reboot computers. An active Lua process may retain already loaded modules, so restart `robotd.lua`, `drive.lua`, or `ociactl.lua` manually when the changed code must take effect. Avoid intentionally deploying during a physical robot operation: individual files cannot be partially copied, but a process loading modules during a multi-file apply can observe a mixture of versions. `filesystem.bufferChanges=false` permits external file changes to become visible, but successful host verification does not prove OpenOS runtime behavior.
 
 For a first deployment or any deliberate pose recovery:
 
-1. Populate `deploy.local.lua`, run the all-target dry run, review it, and apply it.
-2. Run the dry run again and verify every manifest entry is `UNCHANGED`.
-3. Configure `/etc/ocia.cfg` on both computers without confusing modem addresses with HDD UUIDs.
-4. Put Wheatley at the origin facing North and stop `robotd.lua` before commissioning.
-5. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.
-6. Start `robotd.lua`.
-7. Run `ociactl.lua` with no arguments before any physical command.
+1. Discover both full modem addresses from the OpenOS machines.
+2. Populate Git-ignored `deploy.local.lua` with the world, disk, and modem identities.
+3. Run the all-target dry run and inspect all 18 actions, especially both generated `/etc/ocia.cfg` entries.
+4. Apply the installer, then run another dry run and verify all 18 entries are `UNCHANGED`.
+5. Manually restart relevant OpenOS programs when the installed code or configuration must take effect.
+6. Put Wheatley at the origin facing North and stop `robotd.lua` before commissioning.
+7. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.
+8. Start `robotd.lua`.
+9. Run `ociactl.lua` with no arguments before any physical command.
 
 ## Host Test
 
@@ -214,13 +219,13 @@ docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.20 \
   sh -c 'apk add --no-cache lua5.3 lua-filesystem >/dev/null && lua5.3 tests/deploy_test.lua'
 ```
 
-On 2026-10-30 it passed `16 tests, 68 assertions, 0 failures`. It uses disposable temporary worlds only and covers validation, dry-run purity, target selection, create/update/unchanged behavior, backups, protected state, idempotence, unsafe paths, nonzero CLI errors, and staged failure handling.
+On 2026-10-30 it passed `25 tests, 152 assertions, 0 failures`. It uses disposable temporary worlds only and covers disk/modem validation, deterministic configuration rendering, dry-run purity, target selection, generated create/update/unchanged behavior, backups, protected journal state, idempotence, unsafe paths, nonzero CLI errors, and staged failure handling.
 
 ## Supervised In-Game Acceptance
 
 Use a clear, player-loaded test area. Keep Wheatley away from unsafe adjacent blocks during movement and interruption tests. Record commands, identifiers, physical observations, replies, and journal diagnostics.
 
-1. Confirm both full modem addresses and configure both `/etc/ocia.cfg` files. Verify each configured local address against `component.modem.address`; a mismatch must prevent startup.
+1. Confirm both full modem addresses in ignored `deploy.local.lua`, apply the reviewed generated configurations, and verify each configured local address against `component.modem.address`; a mismatch must prevent startup.
 2. With Wheatley at the origin facing North and `robotd.lua` stopped, run `ocia-recover.lua show`, then `ocia-recover.lua reset-origin` and type `RESET`. Record the new epoch and high water `0`.
 3. Start `robotd.lua`. Confirm it reports port 4242 and mode `ready`. Interrupt and restart it once while the port remains open; no port-open assertion may occur.
 4. Run controller `ociactl.lua` with no arguments. Expect `Certainty: succeeded`, `Status: succeeded`, a trusted `(0,0,0)` North pose, the commissioned epoch/high water, healthy journal diagnostics, energy, and memory. Wheatley must not move.

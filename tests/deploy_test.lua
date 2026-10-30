@@ -70,9 +70,29 @@ end
 local fixture_counter = 0
 local controller_uuid = "11111111-1111-4111-8111-111111111111"
 local robot_uuid = "22222222-2222-4222-8222-222222222222"
+local controller_modem = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+local robot_modem = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+local template = table.concat({
+  "# fixture configuration; formatting must survive",
+  "controller_address=CONTROLLER_MODEM_UUID",
+  "robot_address=ROBOT_MODEM_UUID",
+  "port=4242",
+  "protocol_version=1",
+  "timeout=8",
+  "recent_results=32",
+  "compact_records=128",
+  "compact_bytes=65536",
+  "legacy_enabled=true",
+  "state_path=/var/lib/ocia/robot.state",
+  "",
+}, "\n")
 local manifest = {
-  controller = {"home/controller.lua", "etc/ocia.cfg.example"},
-  robot = {"home/robot.lua", "lib/ocia/state.lua", "etc/ocia.cfg.example"},
+  controller = {"home/controller.lua", "etc/ocia.cfg.example",
+    {destination = "etc/ocia.cfg", template = "etc/ocia.cfg.example",
+      generated = "ocia_config"}},
+  robot = {"home/robot.lua", "lib/ocia/state.lua", "etc/ocia.cfg.example",
+    {destination = "etc/ocia.cfg", template = "etc/ocia.cfg.example",
+      generated = "ocia_config"}},
 }
 
 local function fixture()
@@ -88,16 +108,35 @@ local function fixture()
   mkdirs(join(world, "opencomputers/" .. controller_uuid))
   mkdirs(join(world, "opencomputers/" .. robot_uuid))
   write(join(root, "repo/machines/controller/home/controller.lua"), "controller-v1\n")
-  write(join(root, "repo/machines/controller/etc/ocia.cfg.example"), "controller-example\n")
+  write(join(root, "repo/machines/controller/etc/ocia.cfg.example"), template)
   write(join(root, "repo/machines/robot/home/robot.lua"), "robot-v1\n")
   write(join(root, "repo/machines/robot/lib/ocia/state.lua"), "state-v1\n")
-  write(join(root, "repo/machines/robot/etc/ocia.cfg.example"), "robot-example\n")
+  write(join(root, "repo/machines/robot/etc/ocia.cfg.example"), template)
   return {
     root = root, repo = join(root, "repo"), world = world,
     controller = join(world, "opencomputers/" .. controller_uuid),
     robot = join(world, "opencomputers/" .. robot_uuid),
-    config = {world_save = world, disks = {controller = controller_uuid, robot = robot_uuid}},
+    config = {world_save = world,
+      disks = {controller = controller_uuid, robot = robot_uuid},
+      modems = {controller = controller_modem, robot = robot_modem}},
   }
+end
+
+local function copy_config(config)
+  return {
+    world_save = config.world_save,
+    disks = {controller = config.disks.controller, robot = config.disks.robot},
+    modems = config.modems and {
+      controller = config.modems.controller, robot = config.modems.robot,
+    } or nil,
+  }
+end
+
+local function rendered_config(controller, robot)
+  return assert(deploy.render_ocia_config(template, {
+    controller = controller or controller_modem,
+    robot = robot or robot_modem,
+  }))
 end
 
 local function run(f, args, options)
@@ -132,6 +171,92 @@ test("configuration validation rejects incomplete, placeholder, and unsafe value
   result, err = run(f, {}, {config = {world_save = f.world,
     disks = {controller = "../escape", robot = robot_uuid}}})
   equal(result, nil); contains(err, "canonical HDD UUID")
+  remove_tree(f.root)
+end)
+
+test("modem configuration validates both roles before any target writes", function()
+  local f = fixture()
+  local cases = {
+    {{world_save = f.world, disks = f.config.disks}, "modems must be a table"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {robot = robot_modem}}, "modems.controller must be a string"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = controller_modem}}, "modems.robot must be a string"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = "CONTROLLER_MODEM_UUID", robot = robot_modem}}, "placeholder"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = "not-a-uuid", robot = robot_modem}}, "canonical modem UUID"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = controller_modem, robot = controller_modem}}, "same modem UUID"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = controller_modem .. "\n", robot = robot_modem}}, "control character"},
+    {{world_save = f.world, disks = f.config.disks,
+      modems = {controller = 42, robot = robot_modem}}, "modems.controller must be a string"},
+  }
+  local before = count_files(f.root)
+  for _, item in ipairs(cases) do
+    local result, err = run(f, {"--apply"}, {config = item[1]})
+    equal(result, nil)
+    contains(err, item[2])
+    equal(count_files(f.root), before, "invalid modem configuration wrote files")
+  end
+  remove_tree(f.root)
+end)
+
+test("configuration rendering substitutes only modem identities", function()
+  local rendered = assert(deploy.render_ocia_config(template, {
+    controller = controller_modem, robot = robot_modem,
+  }))
+  contains(rendered, "# fixture configuration; formatting must survive\n")
+  contains(rendered, "controller_address=" .. controller_modem .. "\n")
+  contains(rendered, "robot_address=" .. robot_modem .. "\n")
+  contains(rendered, "port=4242\nprotocol_version=1\n")
+  contains(rendered, "timeout=8\nrecent_results=32\ncompact_records=128\n"
+    .. "compact_bytes=65536\nlegacy_enabled=true\n")
+  contains(rendered, "state_path=/var/lib/ocia/robot.state\n")
+  equal(template:find(controller_modem, 1, true), nil)
+  contains(template, "CONTROLLER_MODEM_UUID")
+end)
+
+test("configuration rendering rejects missing, duplicate, and unexpected placeholders", function()
+  local missing = template:gsub("robot_address=ROBOT_MODEM_UUID\n", "")
+  local rendered, err = deploy.render_ocia_config(missing, {
+    controller = controller_modem, robot = robot_modem,
+  })
+  equal(rendered, nil); contains(err, "exactly one ROBOT_MODEM_UUID")
+  local duplicate = template .. "controller_copy=CONTROLLER_MODEM_UUID\n"
+  rendered, err = deploy.render_ocia_config(duplicate,
+    {controller = controller_modem, robot = robot_modem})
+  equal(rendered, nil); contains(err, "found 2")
+  local unexpected = template .. "extra=BACKUP_MODEM_UUID\n"
+  rendered, err = deploy.render_ocia_config(unexpected,
+    {controller = controller_modem, robot = robot_modem})
+  equal(rendered, nil); contains(err, "unexpected modem placeholder")
+end)
+
+test("invalid templates fail preflight without modifying templates or targets", function()
+  local f = fixture()
+  local template_path = join(f.repo, "machines/controller/etc/ocia.cfg.example")
+  local invalid = template:gsub("robot_address=ROBOT_MODEM_UUID\n", "")
+  write(template_path, invalid)
+  local before = count_files(f.root)
+  local result, err = run(f, {"--target", "controller", "--apply"})
+  equal(result, nil); contains(err, "configuration rendering failed")
+  equal(count_files(f.root), before)
+  equal(read(template_path), invalid)
+  equal(lfs.attributes(join(f.controller, "etc/ocia.cfg")), nil)
+  remove_tree(f.root)
+end)
+
+test("unresolved or unexpected modem placeholders cannot be installed", function()
+  local f = fixture()
+  local template_path = join(f.repo, "machines/robot/etc/ocia.cfg.example")
+  local invalid = template .. "fallback=BACKUP_MODEM_UUID\n"
+  write(template_path, invalid)
+  local result, err = run(f, {"--target", "robot", "--apply"})
+  equal(result, nil); contains(err, "unexpected modem placeholder")
+  equal(read(template_path), invalid)
+  equal(lfs.attributes(join(f.robot, "etc/ocia.cfg")), nil)
   remove_tree(f.root)
 end)
 
@@ -181,9 +306,11 @@ end)
 test("initial apply creates only manifest files", function()
   local f = fixture()
   local result = assert(run(f, {"--apply"}))
-  equal(#result.installed, 5)
+  equal(#result.installed, 7)
   equal(read(join(f.controller, "home/controller.lua")), "controller-v1\n")
   equal(read(join(f.robot, "lib/ocia/state.lua")), "state-v1\n")
+  equal(read(join(f.controller, "etc/ocia.cfg")), rendered_config())
+  equal(read(join(f.robot, "etc/ocia.cfg")), rendered_config())
   equal(lfs.attributes(join(f.controller, "bin")), nil)
   equal(lfs.attributes(join(f.repo, ".deploy-backups")), nil)
   remove_tree(f.root)
@@ -200,6 +327,39 @@ test("changed files are updated and original bytes are backed up", function()
   remove_tree(f.root)
 end)
 
+test("existing manual configuration is updated and backed up byte-for-byte", function()
+  local f = fixture()
+  local original = "# hand edited\ncontroller_address=old\0bytes\n"
+  write(join(f.controller, "etc/ocia.cfg"), original)
+  local result = assert(run(f, {"--target", "controller", "--apply"}))
+  equal(read(join(f.controller, "etc/ocia.cfg")), rendered_config())
+  truthy(result.backup_run)
+  equal(read(join(f.repo, ".deploy-backups/" .. result.backup_run
+    .. "/controller/etc/ocia.cfg")), original)
+  equal(read(join(f.repo, "machines/controller/etc/ocia.cfg.example")), template)
+  remove_tree(f.root)
+end)
+
+test("changing either modem identity updates both generated configurations", function()
+  local f = fixture()
+  assert(run(f, {"--apply"}))
+  local changed = copy_config(f.config)
+  changed.modems.robot = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  local result, _, _, output = run(f, {}, {config = changed})
+  truthy(result and result.dry_run)
+  local generated_updates = 0
+  for _, entry in ipairs(result.plan) do
+    if entry.generated and entry.action == "UPDATE" then generated_updates = generated_updates + 1 end
+  end
+  equal(generated_updates, 2)
+  contains(output, "UPDATE    etc/ocia.cfg (generated)")
+  assert(run(f, {"--apply"}, {config = changed}))
+  local expected = rendered_config(controller_modem, changed.modems.robot)
+  equal(read(join(f.controller, "etc/ocia.cfg")), expected)
+  equal(read(join(f.robot, "etc/ocia.cfg")), expected)
+  remove_tree(f.root)
+end)
+
 test("identical files are skipped and repeated apply is idempotent", function()
   local f = fixture()
   assert(run(f, {"--apply"}))
@@ -207,6 +367,7 @@ test("identical files are skipped and repeated apply is idempotent", function()
   local result, _, _, output = run(f, {"--apply"})
   equal(#result.installed, 0)
   contains(output, "UNCHANGED")
+  contains(output, "UNCHANGED etc/ocia.cfg (generated)")
   equal(count_files(f.root), before)
   remove_tree(f.root)
 end)
@@ -215,13 +376,18 @@ test("controller-only and robot-only selections remain isolated", function()
   local f = fixture()
   assert(run(f, {"--target", "controller", "--apply"}))
   truthy(lfs.attributes(join(f.controller, "home/controller.lua")))
+  truthy(lfs.attributes(join(f.controller, "etc/ocia.cfg")))
   equal(lfs.attributes(join(f.robot, "home/robot.lua")), nil)
+  equal(lfs.attributes(join(f.robot, "etc/ocia.cfg")), nil)
+  write(join(f.controller, "etc/ocia.cfg"), "controller-only-marker\n")
   assert(run(f, {"--target", "robot", "--apply"}))
   truthy(lfs.attributes(join(f.robot, "home/robot.lua")))
+  truthy(lfs.attributes(join(f.robot, "etc/ocia.cfg")))
+  equal(read(join(f.controller, "etc/ocia.cfg")), "controller-only-marker\n")
   remove_tree(f.root)
 end)
 
-test("runtime configuration, journal artifacts, and unlisted files are preserved", function()
+test("generated configuration is authoritative while journal and unlisted files are preserved", function()
   local f = fixture()
   write(join(f.controller, "etc/ocia.cfg"), "live-controller-config\n")
   write(join(f.robot, "etc/ocia.cfg"), "live-robot-config\n")
@@ -231,8 +397,8 @@ test("runtime configuration, journal artifacts, and unlisted files are preserved
   write(join(f.robot, "var/lib/ocia/robot.state.switch"), "switch\n")
   write(join(f.robot, "home/user-note.txt"), "keep me\n")
   assert(run(f, {"--apply"}))
-  equal(read(join(f.controller, "etc/ocia.cfg")), "live-controller-config\n")
-  equal(read(join(f.robot, "etc/ocia.cfg")), "live-robot-config\n")
+  equal(read(join(f.controller, "etc/ocia.cfg")), rendered_config())
+  equal(read(join(f.robot, "etc/ocia.cfg")), rendered_config())
   equal(read(join(f.robot, "var/lib/ocia/robot.state")), "journal\n")
   equal(read(join(f.robot, "var/lib/ocia/robot.state.new")), "new\n")
   equal(read(join(f.robot, "var/lib/ocia/robot.state.old")), "old\n")
@@ -248,6 +414,16 @@ test("unsafe and protected manifest destinations are rejected", function()
   result, err = run(f, {"--target", "robot"},
     {manifest = {controller = {}, robot = {"var/lib/ocia/robot.state"}}})
   equal(result, nil); contains(err, "protected runtime path")
+  result, err = run(f, {"--target", "controller"},
+    {manifest = {controller = {"etc/ocia.cfg"}, robot = {}}})
+  equal(result, nil); contains(err, "protected runtime path")
+  result, err = run(f, {"--target", "controller"},
+    {manifest = {controller = {"etc/unlisted.cfg"}, robot = {}}})
+  equal(result, nil); contains(err, "protected runtime path")
+  result, err = run(f, {"--target", "controller"}, {manifest = {controller = {
+    {destination = "etc/ocia.cfg", template = "home/controller.lua",
+      generated = "ocia_config"}}, robot = {}}})
+  equal(result, nil); contains(err, "must use etc/ocia.cfg.example")
   remove_tree(f.root)
 end)
 
@@ -288,6 +464,37 @@ test("replacement failure is nonzero, preserves destination, and keeps backup", 
   truthy(partial and partial.backup_run)
   equal(read(join(f.repo, ".deploy-backups/" .. partial.backup_run
     .. "/controller/home/controller.lua")), "original\n")
+  remove_tree(f.root)
+end)
+
+test("configuration backup, staging, and replacement failures preserve the installed file", function()
+  for _, operation in ipairs({"backup", "stage", "replace"}) do
+    local f = fixture()
+    assert(run(f, {"--target", "controller", "--apply"}))
+    local original = "manual-before-" .. operation .. "\n"
+    write(join(f.controller, "etc/ocia.cfg"), original)
+    local result, err = run(f, {"--target", "controller", "--apply"},
+      {inject_failure = {operation = operation, relative = "etc/ocia.cfg"}})
+    equal(result, nil)
+    local label = ({backup = "backup", stage = "staging", replace = "replacement"})[operation]
+    contains(err, "injected " .. label .. " failure")
+    equal(read(join(f.controller, "etc/ocia.cfg")), original)
+    remove_tree(f.root)
+  end
+end)
+
+test("generated configuration failure reports earlier installed files and stops", function()
+  local f = fixture()
+  assert(run(f, {"--target", "controller", "--apply"}))
+  write(join(f.repo, "machines/controller/home/controller.lua"), "controller-v2\n")
+  write(join(f.controller, "etc/ocia.cfg"), "manual\n")
+  local result, err, partial = run(f, {"--target", "controller", "--apply"},
+    {inject_failure = {operation = "replace", relative = "etc/ocia.cfg"}})
+  equal(result, nil); contains(err, "etc/ocia.cfg")
+  equal(#partial.installed, 1)
+  equal(partial.installed[1], "controller:home/controller.lua")
+  equal(read(join(f.controller, "home/controller.lua")), "controller-v2\n")
+  equal(read(join(f.controller, "etc/ocia.cfg")), "manual\n")
   remove_tree(f.root)
 end)
 

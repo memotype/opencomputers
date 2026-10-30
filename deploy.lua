@@ -18,6 +18,8 @@ M.manifest = {
     "lib/ocia/protocol.lua",
     "lib/ocia/transport.lua",
     "etc/ocia.cfg.example",
+    {destination = "etc/ocia.cfg", template = "etc/ocia.cfg.example",
+      generated = "ocia_config"},
   },
   robot = {
     "home/robotd.lua",
@@ -29,6 +31,8 @@ M.manifest = {
     "lib/ocia/protocol.lua",
     "lib/ocia/state.lua",
     "etc/ocia.cfg.example",
+    {destination = "etc/ocia.cfg", template = "etc/ocia.cfg.example",
+      generated = "ocia_config"},
   },
 }
 
@@ -105,13 +109,54 @@ local function valid_relative(path)
   return true
 end
 
-local function protected_path(path)
-  return protected[path] or path == "var" or path:match("^var/") ~= nil
+local function protected_path(path, generated)
+  if path == "etc/ocia.cfg" and generated == "ocia_config" then return false end
+  if path == "etc/ocia.cfg.example" and generated == nil then return false end
+  return protected[path] or path == "etc" or path:match("^etc/") ~= nil
+    or path == "var" or path:match("^var/") ~= nil
 end
 
 local function valid_uuid(value)
   return type(value) == "string"
     and value:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") ~= nil
+end
+
+local function count_plain(value, needle)
+  local count, position = 0, 1
+  while true do
+    local found = value:find(needle, position, true)
+    if not found then return count end
+    count = count + 1
+    position = found + #needle
+  end
+end
+
+function M.render_ocia_config(template, modems)
+  if type(template) ~= "string" then return nil, "OpenOS configuration template must be a string" end
+  if type(modems) ~= "table" then return nil, "modem configuration must be a table" end
+  local placeholders = {
+    CONTROLLER_MODEM_UUID = modems.controller,
+    ROBOT_MODEM_UUID = modems.robot,
+  }
+  for token in template:gmatch("[%u][%u%d_]*MODEM[%u%d_]*UUID[%u%d_]*") do
+    if placeholders[token] == nil then
+      return nil, "unexpected modem placeholder in OpenOS configuration template: " .. token
+    end
+  end
+  local rendered = template
+  for _, placeholder in ipairs({"CONTROLLER_MODEM_UUID", "ROBOT_MODEM_UUID"}) do
+    local count = count_plain(rendered, placeholder)
+    if count ~= 1 then
+      return nil, string.format("OpenOS configuration template must contain exactly one %s (found %d)",
+        placeholder, count)
+    end
+    rendered = rendered:gsub(placeholder, placeholders[placeholder])
+  end
+  local unresolved = rendered:match("[%u][%u%d_]*MODEM[%u%d_]*UUID[%u%d_]*")
+  if unresolved then
+    return nil, "unresolved modem placeholder in OpenOS configuration template: " .. unresolved
+  end
+  return rendered
 end
 
 local function read_file(path)
@@ -230,7 +275,28 @@ function M.validate_config(config, selected_roles)
     if not ok then return nil, err end
     targets[role] = {disk = disk, root = target}
   end
-  return {world = world, opencomputers = opencomputers, targets = targets}
+  if type(config.modems) ~= "table" then return nil, "configuration modems must be a table" end
+  local modems = {}
+  for _, role in ipairs({"controller", "robot"}) do
+    local modem = config.modems[role]
+    if type(modem) ~= "string" then
+      return nil, string.format("configuration modems.%s must be a string", role)
+    end
+    if modem:find("MODEM_UUID", 1, true) then
+      return nil, string.format("configuration modems.%s still contains a placeholder", role)
+    end
+    if modem:find("[%z\1-\31\127]") then
+      return nil, string.format("configuration modems.%s contains a control character", role)
+    end
+    if not valid_uuid(modem) then
+      return nil, string.format("configuration modems.%s must be a canonical modem UUID", role)
+    end
+    modems[role] = modem
+  end
+  if modems.controller == modems.robot then
+    return nil, "controller and robot must not use the same modem UUID"
+  end
+  return {world = world, opencomputers = opencomputers, targets = targets, modems = modems}
 end
 
 local function parse_args(args)
@@ -270,16 +336,37 @@ local function preflight(root, manifest, validated, roles)
   local plan = {}
   for _, role in ipairs(roles) do
     if type(manifest[role]) ~= "table" then return nil, "manifest is missing role " .. role end
-    for _, relative in ipairs(manifest[role]) do
+    for _, item in ipairs(manifest[role]) do
+      local relative, source_relative, generated
+      if type(item) == "string" then
+        relative, source_relative = item, item
+      elseif type(item) == "table" then
+        relative, source_relative, generated = item.destination, item.template, item.generated
+        if generated ~= "ocia_config" then
+          return nil, "unsupported generated manifest entry for " .. role .. ": " .. tostring(relative)
+        end
+        if relative ~= "etc/ocia.cfg" or source_relative ~= "etc/ocia.cfg.example" then
+          return nil, "generated OpenOS configuration must use etc/ocia.cfg.example -> etc/ocia.cfg"
+        end
+      else
+        return nil, "invalid manifest entry for " .. role
+      end
       if not valid_relative(relative) then return nil, "unsafe manifest path for " .. role .. ": " .. tostring(relative) end
-      if protected_path(relative) then return nil, "manifest targets protected runtime path: " .. relative end
-      local source_path = join(join(root, "machines/" .. role), relative)
+      if not valid_relative(source_relative) then
+        return nil, "unsafe manifest source for " .. role .. ": " .. tostring(source_relative)
+      end
+      if protected_path(relative, generated) then return nil, "manifest targets protected runtime path: " .. relative end
+      local source_path = join(join(root, "machines/" .. role), source_relative)
       local source_attr = attributes(source_path, true)
       if not source_attr or source_attr.mode ~= "file" then
         return nil, path_error("manifest source", source_path, "is missing or is not a regular file")
       end
       local content, read_err = read_file(source_path)
       if not content then return nil, read_err end
+      if generated == "ocia_config" then
+        content, read_err = M.render_ocia_config(content, validated.modems)
+        if not content then return nil, role .. " configuration rendering failed: " .. read_err end
+      end
       local target_root = validated.targets[role].root
       local safe, safe_err = inspect_relative(target_root, relative, true)
       if not safe then return nil, safe_err end
@@ -297,6 +384,7 @@ local function preflight(root, manifest, validated, roles)
       plan[#plan + 1] = {
         role = role, relative = relative, source = source_path,
         destination = destination, content = content, action = action,
+        generated = generated ~= nil,
       }
     end
   end
@@ -430,7 +518,10 @@ function M.run(args, options)
     emit("World: " .. validated.world)
     emit("Disk: " .. validated.targets[role].disk)
     for _, entry in ipairs(plan) do
-      if entry.role == role then emit(string.format("%-9s %s", entry.action, entry.relative)) end
+      if entry.role == role then
+        emit(string.format("%-9s %s%s", entry.action, entry.relative,
+          entry.generated and " (generated)" or ""))
+      end
     end
     emit("")
   end
@@ -465,7 +556,8 @@ function M.run(args, options)
         }
       end
       installed[#installed + 1] = entry.role .. ":" .. entry.relative
-      emit("INSTALLED " .. entry.role .. " " .. entry.relative)
+      emit("INSTALLED " .. entry.role .. " " .. entry.relative
+        .. (entry.generated and " (generated)" or ""))
     end
   end
   emit(string.format("Apply complete: %d file(s) installed and verified.", #installed))

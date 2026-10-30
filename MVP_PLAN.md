@@ -264,7 +264,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 **Failure/recovery:** Timeout leaves the controller in an ambiguous state until status reconciliation. A restart from `prepared` records definite nonexecution if that resolution persists. A restart from `executing` reports unknown physical outcome, invalidates trusted pose, and never replays the request.
 
-**Unresolved dependencies:** Controller and robot modem UUIDs must be recorded; the new daemon, append-only journal, compaction, epoch commissioning, actual modem behavior, duplicate and retired-request handling, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). OpenOS memory, disk, flush, rename, and timing behavior remain unmeasured.
+**Unresolved dependencies:** The confirmed controller and robot modem UUIDs are recorded in ignored host configuration and generate both OpenOS configuration files, but that installer update has not yet been applied to the live HDDs. The new daemon, append-only journal, compaction, epoch commissioning, actual modem behavior, duplicate and retired-request handling, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). OpenOS memory, disk, flush, rename, and timing behavior remain unmeasured.
 
 ### Milestone 2: Durable pose, energy, and hardware primitives
 

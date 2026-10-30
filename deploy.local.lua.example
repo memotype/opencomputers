@@ -5,4 +5,9 @@ return {
     controller = "CONTROLLER_DISK_UUID",
     robot = "ROBOT_DISK_UUID",
   },
+
+  modems = {
+    controller = "CONTROLLER_MODEM_UUID",
+    robot = "ROBOT_MODEM_UUID",
+  },
 }
