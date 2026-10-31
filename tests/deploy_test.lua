@@ -139,6 +139,25 @@ local function rendered_config(controller, robot)
   }))
 end
 
+test("production manifest includes the supervised farm runtime files", function()
+  local controller = {}
+  for _, entry in ipairs(deploy.manifest.controller) do
+    if type(entry) == "string" then controller[entry] = true end
+  end
+  local robot = {}
+  for _, entry in ipairs(deploy.manifest.robot) do
+    if type(entry) == "string" then robot[entry] = true end
+  end
+  equal(#deploy.manifest.controller, 10)
+  equal(#deploy.manifest.robot, 11)
+  truthy(controller["home/ociafarm.lua"])
+  truthy(controller["lib/ocia/farm.lua"])
+  truthy(robot["lib/ocia/farming.lua"])
+  equal(lfs.attributes("machines/controller/home/ociafarm.lua", "mode"), "file")
+  equal(lfs.attributes("machines/controller/lib/ocia/farm.lua", "mode"), "file")
+  equal(lfs.attributes("machines/robot/lib/ocia/farming.lua", "mode"), "file")
+end)
+
 local function run(f, args, options)
   local output = {}
   options = options or {}

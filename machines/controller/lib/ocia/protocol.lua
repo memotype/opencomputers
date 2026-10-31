@@ -13,7 +13,11 @@ protocol.operations = {
   move_forward = {physical = true},
   move_backward = {physical = true},
   move_up = {physical = true},
-  move_down = {physical = true}
+  move_down = {physical = true},
+  till_down = {physical = true},
+  till_forward_down = {physical = true},
+  plant_down = {physical = true},
+  plant_forward_down = {physical = true}
 }
 
 protocol.outcomes = {
@@ -133,6 +137,23 @@ function protocol.isPhysical(operation)
   return definition and definition.physical or false
 end
 
+local function validateArguments(operation, arguments)
+  if operation == "plant_down" or operation == "plant_forward_down" then
+    for key in pairs(arguments) do
+      if key ~= "slot" then return nil, operation .. " accepts only the slot argument" end
+    end
+    local slot = arguments.slot
+    if type(slot) ~= "string" or not slot:match("^%d+$") then
+      return nil, operation .. " requires an integer slot"
+    end
+    slot = tonumber(slot)
+    if slot < 1 or slot > 16 then return nil, operation .. " slot must be between 1 and 16" end
+    return true
+  end
+  if next(arguments) ~= nil then return nil, "operation does not accept arguments" end
+  return true
+end
+
 function protocol.parsePhysicalRequestId(requestId)
   if type(requestId) ~= "string" then return nil, "request ID must be a string" end
   local epoch, sequenceText = requestId:match("^p:([%x%-]+):(%d+)$")
@@ -246,9 +267,8 @@ function protocol.parseRequest(parts, localAddress)
   if #parts[8] > protocol.MAX_WIRE_PAYLOAD then
     return nil, "invalid_arguments", "argument payload is too large"
   end
-  if next(arguments) ~= nil then
-    return nil, "invalid_arguments", "initial operations do not accept arguments"
-  end
+  local argumentsOk, argumentsReason = validateArguments(parts[7], arguments)
+  if not argumentsOk then return nil, "invalid_arguments", argumentsReason end
 
   local request = {
     version = parts[2],

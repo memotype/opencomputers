@@ -88,6 +88,9 @@ function pose.apply(value, operation)
     result.y = result.y + 1
   elseif operation == "move_down" then
     result.y = result.y - 1
+  elseif operation == "till_down" or operation == "till_forward_down"
+      or operation == "plant_down" or operation == "plant_forward_down" then
+    -- World interactions are physical but do not move or rotate the robot.
   else
     return nil, "operation does not change pose"
   end

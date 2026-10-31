@@ -11,9 +11,11 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Robot program: `machines/robot/home/robotd.lua`
 - Wireless port: `4242`
 - Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Core supervised transport, movement, duplicate/conflict handling, commissioning, and normal restart tests passed on 2026-10-30; compaction and fault-injection acceptance remain pending, so Milestone 1 is partially accepted rather than complete.
-- `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. Its effective manifest is now 8 controller files and 10 robot files, including one generated `/etc/ocia.cfg` per role; journal state remains excluded.
+- The remaining Milestone 1 compaction and fault-injection acceptance is deliberately deferred while the project prioritizes a supervised, playable construction vertical slice: Wheatley's first 3x3 Potato patch. Milestone 1 is not complete.
+- `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. The corrected prototype manifest is now 10 controller files and 11 robot files, including one generated `/etc/ocia.cfg` per role; journal state remains excluded.
 - `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save, two HDD UUIDs, and two confirmed modem UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
 - The full 18-entry manifest is installed in the live world. Both generated `/etc/ocia.cfg` files loaded successfully in OpenOS, and a post-apply dry run reported all 18 entries `UNCHANGED`.
+- The 20-entry first Potato prototype was installed and byte-idempotent; its directly-downward autonomous till failed definitely. The subsequent forward/downward revision was deployed and demonstrated journaled tilling plus aerial planting. Current one-pass `plant_forward_down` source has not been deployed. [POTATO_PATCH.md](POTATO_PATCH.md) is the operator runbook.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
@@ -147,7 +149,7 @@ Implemented logical source paths:
 - Address placeholders and runtime limits in `etc/ocia.cfg.example` on both disks.
 - Pure host suite in `tests/run.lua`; operational contract and supervised procedure in [MILESTONE1.md](MILESTONE1.md).
 
-Protocol version 1 uses eight modem parts and a bounded encoded payload. It supports read-only `status` and one-operation turns/moves. The controller unicasts to the configured robot, validates the reply sender and correlation fields, and reports `succeeded`, `failed`, or `unknown`; a timeout is `unknown`.
+Protocol version 1 uses eight modem parts and a bounded encoded payload. It supports read-only `status` plus one-operation turns, moves, and the supervised farming interactions. The controller unicasts to the configured robot, validates the reply sender and correlation fields, and reports `succeeded`, `failed`, or `unknown`; a timeout is `unknown`.
 
 Physical requests use `p:<execution-epoch>:<monotonic-sequence>`. Explicit origin commissioning creates the epoch and begins at high water zero. Before a physical call, Wheatley appends `prepared`—which allocates and advances the high-water sequence—and then `executing`. A completed record preserves the result and resulting pose. Restart from a healthy `prepared` record appends a definite nonexecution result; restart from `executing`, an operation exception, or failure to persist completion becomes `recovery_required` with untrusted pose and an unknown physical outcome.
 
@@ -160,6 +162,22 @@ Host result on 2026-10-30: the prior hardening pass ended at 26 tests / 6262 ass
 The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` was inspected directly for close semantics. The filesystem component's successful `close` callback returns no values, and the OpenOS buffered handle therefore normally returns `nil` on success; `nil` cannot be treated as a failure indicator. The HDD-backed handle calls `RandomAccessFile.close()`, and a raised close exception propagates through the component invocation. Journal writes now catch that exceptional path and fail closed as an uncertain write; journal verification also rejects a raised close error. Host fault tests cover close exceptions at `prepared`, `executing`, `completed`, and compaction boundaries. This handling does not provide `fsync`, power-loss durability, or proof of real OpenOS behavior, which remain in-game acceptance concerns.
 
 Deployment installer result on 2026-10-30: `tests/deploy_test.lua` passes 25 tests / 152 assertions with Lua 5.3 and LuaFileSystem. Fixtures cover disk and modem validation, deterministic template rendering, dry-run purity, role selection, generated create/update/unchanged behavior, byte-preserving backups, journal and unlisted-file preservation, idempotence, unsafe paths, nonzero CLI errors, and injected staging/backup/replacement failures. Those fixture results used no live world; the subsequent supervised session below separately deployed and loaded the generated configuration.
+
+### Supervised Potato-patch vertical slice: 2026-10-31
+
+Development priority shifted temporarily from exhaustive Milestone 1 acceptance to getting Wheatley visibly building. The first 20-file farm prototype deployed cleanly and was byte-idempotent. Its first apply was rejected locally because the controller had cached an older protocol module; after the controller reboot, Wheatley's still-running daemon rejected the new operation until Wheatley was also rebooted. Filesystem visibility did not replace already-loaded Lua modules.
+
+With both machines current, request `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:11` reached `till_down` and completed as definite `failed / operation_failed`; the controller stopped before moving or planting. Local inspection showed `robot.durability()` at `1.0`, a visibly equipped Stone Hoe, and `geolyzer.analyze(sides.down)` identifying the target as `minecraft:grass` metadata 0 with `snowy=false`.
+
+From an adjacent pose facing suitable Grass, the manual REPL call `robot.use(sides.down)` visibly converted the forward soil to WAILA-identified `minecraft:farmland`. Its return values were not captured. This proves the physical forward/downward interaction, not an autonomous journaled operation; it did not move Wheatley or change tracked pose. The directly-downward failure is likely related to Wheatley occupying the future crop space, but that internal cause is not independently proven.
+
+The journaled `till_forward_down` follow-up then succeeded as request `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:15`, returned `operation_succeeded / item_placed`, left Wheatley's pose unchanged, and visibly produced WAILA-identified Farmland. The eight-operation aerial `single-plant` route also completed and visibly produced a Potato crop at 0% growth, proving `plant_down` but exposing needless navigation.
+
+After removing that crop, the operator stopped `robotd`, selected slot 1 in the local Lua REPL, and ran `robot.place(sides.down)` from the same adjacent crop-height pose. It returned `true, nil`, consumed one Potato, and produced another WAILA-identified Potato crop at 0% growth. This manual action was outside OCIA and did not change tracked pose. It decisively removed the need for overhead planting.
+
+Host source now retains all prior operation semantics and adds stationary, slot-fingerprinted `plant_forward_down`. `single` performs adjacent till then plant without moving; `single-plant` performs only adjacent planting. The pair remains outside its two cells. The 3x3 route enters one unplanted perimeter crop space to farm the center, exits before planting that access cell, then completes the perimeter from the exterior ring without entering any planted cell. The controller still requires live ready/trusted status, previews without physical requests, requires `FARM`, and stops on non-success or uncertainty. See [POTATO_PATCH.md](POTATO_PATCH.md).
+
+Host verification passed `37 tests, 6647 assertions, 0 failures`; deployment fixtures passed `26 tests, 160 assertions, 0 failures`. All Lua sources compile with Lua 5.3. The one-pass source was not deployed and no live journal or world file was modified during implementation.
 
 ### Milestone 1 Supervised In-Game Acceptance Session: 2026-10-30
 
@@ -873,7 +891,9 @@ Related risks: OCIA-019, OCIA-021.
 
 ## Immediate Next Work
 
-Deploy and accept Milestone 1 using [MILESTONE1.md](MILESTONE1.md):
+Deploy and test the supervised Potato prototype using [POTATO_PATCH.md](POTATO_PATCH.md), beginning with one fresh Dirt/Grass cell and proceeding to two cells and then a fresh 3x3 plot only after the interaction geometry is visibly confirmed.
+
+The deferred Milestone 1 acceptance queue remains:
 
 1. While Wheatley is idle in a safe pose, restart `robotd` and retry an exactly retained request ID/operation; confirm a cached response and no physical action.
 2. Send a recorded physical request ID from the superseded first epoch; confirm `stale_epoch` and no movement without recommissioning merely to arrange the test.

@@ -20,7 +20,7 @@ Reply:
 "OCIA", 1, "reply", request_id, deployment_id, operation, outcome, result
 ```
 
-The supported operations are `status`, `turn_left`, `turn_right`, `move_forward`, `move_backward`, `move_up`, and `move_down`. They take no arguments. Each movement or turn is exactly one physical operation. Outcomes are `succeeded`, `failed`, `rejected`, and `recovery_required`; controller certainty is respectively definite success, definite failure, definite failure, and unknown. A controller timeout is also unknown, not failure.
+The supported operations are `status`, `turn_left`, `turn_right`, `move_forward`, `move_backward`, `move_up`, `move_down`, `till_down`, `till_forward_down`, `plant_down`, and `plant_forward_down`. The planting operations take one argument: their validated inventory `slot`. Each physical request performs exactly one bounded action. Outcomes are `succeeded`, `failed`, `rejected`, and `recovery_required`; controller certainty is respectively definite success, definite failure, definite failure, and unknown. A controller timeout is also unknown, not failure.
 
 Status request identifiers use `s:<token>`. Physical request identifiers use:
 
@@ -166,8 +166,10 @@ The manifest contains only these paths:
 ```text
 machines/controller -> live controller HDD
   /home/drive.lua
+  /home/ociafarm.lua
   /home/ociactl.lua
   /lib/ocia/config.lua
+  /lib/ocia/farm.lua
   /lib/ocia/pose.lua
   /lib/ocia/protocol.lua
   /lib/ocia/transport.lua
@@ -179,6 +181,7 @@ machines/robot -> live robot HDD
   /home/ocia-recover.lua
   /lib/ocia/config.lua
   /lib/ocia/executor.lua
+  /lib/ocia/farming.lua
   /lib/ocia/legacy.lua
   /lib/ocia/pose.lua
   /lib/ocia/protocol.lua
@@ -191,7 +194,7 @@ Each generated configuration comes from its role's version-controlled template. 
 
 Files with identical bytes are skipped. Before replacing an existing file—including a manually configured `/etc/ocia.cfg`—the installer preserves its original bytes and relative path under `.deploy-backups/<run>/<role>/`. It writes and flushes a uniquely named temporary file beside the destination, renames it over the destination, and reads the installed file back for verification. A failure stops later changes and reports any files already installed. Backups are not an automatic runtime rollback mechanism, and a multi-file deployment is not atomic.
 
-The installer never recursively synchronizes or deletes HDD content. Its only managed runtime configuration is the exact generated `/etc/ocia.cfg` entry. It does not target `/var/lib/ocia/robot.state`, any journal replacement artifact, or any unlisted file. Missing HDD directories are errors and are not created. The journal directory remains owned by commissioning/runtime code. After applying, review the completed `INSTALLED` lines and backup location, then run another dry run; all 18 entries should report `UNCHANGED`.
+The installer never recursively synchronizes or deletes HDD content. Its only managed runtime configuration is the exact generated `/etc/ocia.cfg` entry. It does not target `/var/lib/ocia/robot.state`, any journal replacement artifact, or any unlisted file. Missing HDD directories are errors and are not created. The journal directory remains owned by commissioning/runtime code. After applying, review the completed `INSTALLED` lines and backup location, then run another dry run; all 21 current entries should report `UNCHANGED`.
 
 Hot deployment is explicitly supported: Minecraft and OpenOS programs may remain running. The installer does not inspect host processes, stop programs, restart daemons, or reboot computers. An active Lua process may retain already loaded modules, so restart `robotd.lua`, `drive.lua`, or `ociactl.lua` manually when the changed code must take effect. Avoid intentionally deploying during a physical robot operation: individual files cannot be partially copied, but a process loading modules during a multi-file apply can observe a mixture of versions. `filesystem.bufferChanges=false` permits external file changes to become visible, but successful host verification does not prove OpenOS runtime behavior.
 
@@ -199,8 +202,8 @@ For a first deployment or any deliberate pose recovery:
 
 1. Discover both full modem addresses from the OpenOS machines.
 2. Populate Git-ignored `deploy.local.lua` with the world, disk, and modem identities.
-3. Run the all-target dry run and inspect all 18 actions, especially both generated `/etc/ocia.cfg` entries.
-4. Apply the installer, then run another dry run and verify all 18 entries are `UNCHANGED`.
+3. Run the all-target dry run and inspect all 21 current actions, especially both generated `/etc/ocia.cfg` entries.
+4. Apply the installer, then run another dry run and verify all 21 entries are `UNCHANGED`.
 5. Manually restart relevant OpenOS programs when the installed code or configuration must take effect.
 6. Put Wheatley at the origin facing North and stop `robotd.lua` before commissioning.
 7. Run `ocia-recover.lua show`, then explicitly `reset-origin` on Wheatley.

@@ -6,6 +6,8 @@ package.path = table.concat({
 }, ";")
 
 local executor = require("ocia.executor")
+local farm = require("ocia.farm")
+local farming = require("ocia.farming")
 local legacy = require("ocia.legacy")
 local pose = require("ocia.pose")
 local protocol = require("ocia.protocol")
@@ -37,7 +39,7 @@ local function contains(value, fragment)
 end
 
 local statusCounter = 0
-local function request(id, operation, deployment)
+local function request(id, operation, deployment, arguments)
   if operation == "status" and not id then
     statusCounter = statusCounter + 1
     id = "s:test-" .. statusCounter
@@ -47,7 +49,7 @@ local function request(id, operation, deployment)
     deployment_id = deployment or "-",
     recipient = robotAddress,
     operation = operation,
-    arguments = {}
+    arguments = arguments or {}
   })
   truthy(parts, reason)
   return assert(protocol.parseRequest(parts, robotAddress)), parts
@@ -212,6 +214,32 @@ test("protocol enforces status and physical request namespaces", function()
   contains(reason, "execution epoch")
 end)
 
+test("farming operations validate their wire arguments", function()
+  truthy(physical(1, "till_down"))
+  truthy(physical(2, "till_forward_down"))
+  local planted = request(assert(protocol.makePhysicalRequestId(epoch, 2)),
+    "plant_down", "-", {slot = 3})
+  equal(planted.arguments.slot, "3")
+  local forward = request(assert(protocol.makePhysicalRequestId(epoch, 3)),
+    "plant_forward_down", "-", {slot = 4})
+  equal(forward.arguments.slot, "4")
+
+  local parts, reason = protocol.buildRequest({
+    request_id = assert(protocol.makePhysicalRequestId(epoch, 3)),
+    deployment_id = "-", recipient = robotAddress,
+    operation = "plant_down", arguments = {slot = 17}
+  })
+  equal(parts, nil)
+  contains(reason, "between 1 and 16")
+  parts, reason = protocol.buildRequest({
+    request_id = assert(protocol.makePhysicalRequestId(epoch, 3)),
+    deployment_id = "-", recipient = robotAddress,
+    operation = "till_down", arguments = {slot = 1}
+  })
+  equal(parts, nil)
+  contains(reason, "does not accept arguments")
+end)
+
 test("protocol rejects malformed, wrong-version, wrong-recipient, and arguments", function()
   local _, parts = request(nil, "status")
   local cases = {
@@ -254,6 +282,54 @@ test("pose math covers headings, inverses, vertical movement, and ambiguity", fu
   local unknown = pose.unknown(start, "ambiguous")
   equal(unknown.trusted, false)
   equal(pose.apply(unknown, "move_forward"), nil)
+end)
+
+test("stationary farming operations preserve trusted pose", function()
+  local start = pose.new(4, 2, -7, "west")
+  truthy(pose.equal(assert(pose.apply(start, "till_down")), start))
+  truthy(pose.equal(assert(pose.apply(start, "till_forward_down")), start))
+  truthy(pose.equal(assert(pose.apply(start, "plant_down")), start))
+  truthy(pose.equal(assert(pose.apply(start, "plant_forward_down")), start))
+end)
+
+test("farming hardware routes forward-down tilling and planting with verified Potatoes", function()
+  local usedFace, placedFace, selected, count, useDownCalls = nil, nil, nil, 2, 0
+  local robot = {
+    use = function(face) usedFace = face; return true, "item_placed" end,
+    useDown = function() useDownCalls = useDownCalls + 1; return false, "blocked" end,
+    select = function(slot) selected = slot end,
+    count = function() return count end,
+    place = function(face) placedFace = face; count = count - 1; return true, nil end,
+    placeDown = function() return true end
+  }
+  local inventory = {getStackInInternalSlot = function(slot)
+    equal(slot, 3)
+    return {name = "minecraft:potato", size = count}
+  end}
+  local actions = farming.new(robot, {down = 42}, inventory)
+  local ok, detail, fields = actions.till_forward_down()
+  equal(ok, true)
+  equal(detail, "item_placed")
+  equal(usedFace, 42)
+  equal(useDownCalls, 0)
+  equal(fields.interaction_geometry, "forward_down")
+  equal(actions.till_down(), false)
+  equal(useDownCalls, 1)
+
+  ok, detail, fields = actions.plant_forward_down({slot = "3"})
+  equal(ok, true)
+  equal(detail, "selected item placed forward and downward")
+  equal(selected, 3)
+  equal(placedFace, 42)
+  equal(fields.item_name, "minecraft:potato")
+  equal(fields.items_before, 2)
+  equal(fields.items_after, 1)
+  equal(fields.item_consumed, "true")
+
+  local wrong = farming.new(robot, {down = 42}, {
+    getStackInInternalSlot = function() return {name = "minecraft:carrot"} end
+  })
+  equal(wrong.plant_forward_down({slot = "3"}), false)
 end)
 
 test("fresh journal is untrusted and requires explicit commissioning", function()
@@ -310,6 +386,55 @@ test("completed duplicate returns cached output without a second physical call",
   equal(duplicate.outcome, "succeeded")
   equal(duplicate.payload.duplicate, "true")
   equal(calls(), 1)
+end)
+
+test("forward planting requests are journaled, deduplicated, and fingerprint their slot", function()
+  local store = commissionedMemory()
+  local calls, observedSlot = 0
+  local instance = executor.new({
+    store = store,
+    perform = function(operation, arguments)
+      calls = calls + 1
+      observedSlot = arguments.slot
+      return true, "potato placed", {item_consumed = "true", selected_slot = arguments.slot}
+    end
+  })
+  local id = assert(protocol.makePhysicalRequestId(epoch, 1))
+  local item = request(id, "plant_forward_down", "-", {slot = 2})
+  local first = instance:handle(item)
+  equal(first.outcome, "succeeded")
+  equal(first.payload.item_consumed, "true")
+  equal(observedSlot, "2")
+  equal(instance.snapshot.high_water, 1)
+  equal(instance:handle(item).payload.duplicate, "true")
+  local conflict = request(id, "plant_forward_down", "-", {slot = 3})
+  equal(instance:handle(conflict).payload.code, "request_id_conflict")
+  equal(calls, 1)
+end)
+
+test("failed farming actions are definitive completed failures", function()
+  local store = commissionedMemory()
+  local instance, calls = makeExecutor(store, {fail_operation = true})
+  local reply = instance:handle(request(assert(protocol.makePhysicalRequestId(epoch, 1)),
+    "plant_forward_down", "-", {slot = 1}))
+  equal(reply.outcome, "failed")
+  equal(reply.payload.code, "operation_failed")
+  equal(instance.snapshot.high_water, 1)
+  equal(instance.snapshot.pose.trusted, true)
+  equal(calls(), 1)
+end)
+
+test("legacy till_down completed results remain replay-compatible", function()
+  local store = commissionedMemory()
+  local first, firstCalls = makeExecutor(store)
+  local item = physical(1, "till_down")
+  equal(first:handle(item).outcome, "succeeded")
+  equal(firstCalls(), 1)
+  local restarted, restartCalls = makeExecutor(store)
+  local duplicate = restarted:handle(item)
+  equal(duplicate.outcome, "succeeded")
+  equal(duplicate.payload.duplicate, "true")
+  equal(restartCalls(), 0)
 end)
 
 test("sequence collision, gap, and stale epoch are rejected", function()
@@ -706,6 +831,188 @@ test("transport correlates status and reports timeout as unknown", function()
   equal(timeout.certainty, "unknown")
   equal(timeout.code, "outcome_unknown")
   equal(timeoutClient:sendRequest("move_forward").certainty, "failed")
+end)
+
+local function readyFarmStatus()
+  local value = pose.toFields(pose.new(10, 4, -3, "north"))
+  value.mode, value.epoch, value.high_water = "ready", epoch, 0
+  return value
+end
+
+local localVectors = {
+  north = {x = 0, z = 1}, east = {x = 1, z = 0},
+  south = {x = 0, z = -1}, west = {x = -1, z = 0}
+}
+local localTurns = {
+  north = {left = "west", right = "east"},
+  east = {left = "north", right = "south"},
+  south = {left = "east", right = "west"},
+  west = {left = "south", right = "north"}
+}
+
+local function validateFarmGeometry(plan)
+  local x, z, heading = 0, -1, "north"
+  local tilled, planted = {}, {}
+  local function key(px, pz) return px .. "," .. pz end
+  for _, step in ipairs(plan.steps) do
+    if step.operation == "turn_left" or step.operation == "turn_right" then
+      heading = localTurns[heading][step.operation == "turn_left" and "left" or "right"]
+    elseif step.operation == "move_forward" then
+      local vector = localVectors[heading]
+      local nx, nz = x + vector.x, z + vector.z
+      equal(planted[key(nx, nz)], nil, "route entered a planted crop cell")
+      x, z = nx, nz
+    elseif step.operation == "till_forward_down"
+        or step.operation == "plant_forward_down" then
+      local vector = localVectors[heading]
+      local tx, tz = x + vector.x, z + vector.z
+      equal(step.cell.x, tx, "farming action targeted the wrong x coordinate")
+      equal(step.cell.z, tz, "farming action targeted the wrong z coordinate")
+      local targetKey = key(tx, tz)
+      if step.operation == "till_forward_down" then
+        equal(tilled[targetKey], nil, "cell was tilled more than once")
+        tilled[targetKey] = true
+      else
+        equal(tilled[targetKey], true, "cell was planted before tilling")
+        equal(planted[targetKey], nil, "cell was planted more than once")
+        planted[targetKey] = true
+      end
+    else
+      error("unexpected farm route operation " .. tostring(step.operation))
+    end
+  end
+  return x, z, heading, tilled, planted
+end
+
+test("farm blueprints generate deterministic one-pass adjacent routes", function()
+  local previewCalls = 0
+  local single = assert(farm.plan("single", 4))
+  equal(#single.steps, 2)
+  equal(single.steps[1].operation, "till_forward_down")
+  equal(single.steps[2].operation, "plant_forward_down")
+  equal(single.steps[2].arguments.slot, 4)
+  equal(single.till_count, 1)
+  equal(single.plant_count, 1)
+  equal(previewCalls, 0, "planning must not send physical requests")
+  local start = assert(farm.poseFromStatus(readyFarmStatus()))
+  local target = farm.targetForCell(start, single.cells[1])
+  equal(target.x, 10)
+  equal(target.y, 3)
+  equal(target.z, -4)
+  truthy(pose.equal(assert(farm.expectedEnd(single, start)), start))
+
+  local plant = assert(farm.plan("single-plant", 4))
+  equal(plant.till_count, 0)
+  equal(plant.plant_count, 1)
+  equal(#plant.steps, 1)
+  equal(plant.steps[1].operation, "plant_forward_down")
+  equal(plant.steps[1].arguments.slot, 4)
+  local plantFinish = assert(farm.expectedEnd(plant, start))
+  equal(plantFinish.x, start.x)
+  equal(plantFinish.y, start.y)
+  equal(plantFinish.z, start.z)
+  equal(plantFinish.heading, start.heading)
+
+  local pair = assert(farm.plan("pair", 1))
+  local pairX, pairZ, pairHeading, _, pairPlanted = validateFarmGeometry(pair)
+  equal(pairX, 1)
+  equal(pairZ, -1)
+  equal(pairHeading, "north")
+  equal(pairPlanted["0,0"], true)
+  equal(pairPlanted["1,0"], true)
+
+  local patch = assert(farm.plan("patch", 1))
+  equal(#patch.cells, 9)
+  equal(patch.till_count, 9)
+  equal(patch.plant_count, 9)
+  local expectedCells = {{0, 0}, {1, 0}, {2, 0}, {0, 1}, {1, 1},
+    {2, 1}, {0, 2}, {1, 2}, {2, 2}}
+  for index, expected in ipairs(expectedCells) do
+    equal(patch.cells[index].x, expected[1])
+    equal(patch.cells[index].z, expected[2])
+  end
+  local tillActions, plantActions = 0, 0
+  for _, step in ipairs(patch.steps) do
+    if step.operation == "till_forward_down" then tillActions = tillActions + 1 end
+    if step.operation == "plant_forward_down" then plantActions = plantActions + 1 end
+    truthy(step.operation ~= "move_up" and step.operation ~= "move_down",
+      "one-pass route must not change elevation")
+  end
+  equal(tillActions, 9)
+  equal(plantActions, 9)
+  local endX, endZ, endHeading, tilled, planted = validateFarmGeometry(patch)
+  equal(endX, -1)
+  equal(endZ, 0)
+  equal(endHeading, "east")
+  for _, expected in ipairs(expectedCells) do
+    local targetKey = expected[1] .. "," .. expected[2]
+    equal(tilled[targetKey], true)
+    equal(planted[targetKey], true)
+  end
+  local finish = assert(farm.expectedEnd(patch, start))
+  equal(finish.x, start.x - 1)
+  equal(finish.y, start.y)
+  equal(finish.z, start.z - 1)
+  equal(finish.heading, "east")
+end)
+
+test("farm execution completes the route and stops on uncertain outcomes", function()
+  local patch = assert(farm.plan("patch", 1))
+  local simulated = pose.new(10, 4, -3, "north")
+  local calls = 0
+  local report = farm.execute(patch, readyFarmStatus(), function(operation)
+    calls = calls + 1
+    simulated = assert(pose.apply(simulated, operation))
+    local payload = pose.toFields(simulated)
+    if operation == "plant_forward_down" then payload.item_consumed = "true" end
+    return {certainty = "succeeded", code = "operation_succeeded",
+      message = "OK", payload = payload}
+  end)
+  equal(report.ok, true)
+  equal(report.tilled, 9)
+  equal(report.planted, 9)
+  equal(calls, #patch.steps)
+
+  local single = assert(farm.plan("single", 1))
+  calls = 0
+  local stopped = farm.execute(single, readyFarmStatus(), function()
+    calls = calls + 1
+    return {certainty = "unknown", status = "timeout",
+      code = "outcome_unknown", message = "timeout"}
+  end)
+  equal(stopped.ok, false)
+  equal(stopped.uncertain, true)
+  equal(stopped.tilled, 0)
+  equal(stopped.planted, 0)
+  equal(calls, 1)
+
+  calls = 0
+  local failed = farm.execute(single, readyFarmStatus(), function()
+    calls = calls + 1
+    return {certainty = "failed", status = "failed",
+      code = "operation_failed", message = "blocked"}
+  end)
+  equal(failed.ok, false)
+  equal(failed.uncertain, false)
+  contains(failed.reason, "failed / operation_failed")
+  equal(failed.planted, 0)
+  equal(calls, 1)
+
+  calls = 0
+  simulated = pose.new(10, 4, -3, "north")
+  local unconsumed = farm.execute(single, readyFarmStatus(), function(operation)
+    calls = calls + 1
+    simulated = assert(pose.apply(simulated, operation))
+    local payload = pose.toFields(simulated)
+    if operation == "plant_forward_down" then payload.item_consumed = "false" end
+    return {certainty = "succeeded", status = "succeeded",
+      code = "operation_succeeded", message = "OK", payload = payload}
+  end)
+  equal(unconsumed.ok, false)
+  equal(unconsumed.uncertain, true)
+  equal(unconsumed.tilled, 1)
+  equal(unconsumed.planted, 0)
+  equal(calls, 2)
 end)
 
 test("journal scaling stays bounded across representative workloads", function()

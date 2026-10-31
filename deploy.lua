@@ -13,7 +13,9 @@ M.manifest = {
   controller = {
     "home/drive.lua",
     "home/ociactl.lua",
+    "home/ociafarm.lua",
     "lib/ocia/config.lua",
+    "lib/ocia/farm.lua",
     "lib/ocia/pose.lua",
     "lib/ocia/protocol.lua",
     "lib/ocia/transport.lua",
@@ -26,6 +28,7 @@ M.manifest = {
     "home/ocia-recover.lua",
     "lib/ocia/config.lua",
     "lib/ocia/executor.lua",
+    "lib/ocia/farming.lua",
     "lib/ocia/legacy.lua",
     "lib/ocia/pose.lua",
     "lib/ocia/protocol.lua",

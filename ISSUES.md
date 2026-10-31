@@ -108,7 +108,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Inventory
 - **Risk:** The controller can identify RS inventory, but the robot cannot yet prove which carried item or tool is in a slot during physical execution.
-- **Current evidence:** Native RS `getItems()` has distinguished registry IDs and metadata successfully. Wheatley now boots with both an Inventory Upgrade and recognized `inventory_controller` component, but detailed internal/external slot inspection has not been exercised. The farm requires switching among several equipped tools.
+- **Current evidence:** Native RS `getItems()` has distinguished registry IDs and metadata successfully. The supervised Potato prototype fingerprints an explicit planting slot in each request and records its before/after count, but it does not identify the item in that slot. Wheatley boots with both an Inventory Upgrade and recognized `inventory_controller` component; detailed internal/external slot inspection remains unexercised in game.
 - **Required mitigation:** For the platform prototype, use declared slots and an unconsumed comparison block. Probe Inventory Controller stack descriptions and slot behavior before terrain preparation, then validate every loaded material against the manifest.
 - **Resolution criteria:** The prototype detects incorrect material before reporting success, and the robot can identify required materials and select every required tool safely.
 
@@ -126,7 +126,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Verification
 - **Risk:** Treating the return value of `robot.placeDown` as complete proof can miss an unexpected resulting block or inventory outcome.
-- **Current evidence:** No placement or comparison commands exist in the robot daemon.
+- **Current evidence:** Journaled `till_forward_down` visibly produced Farmland. Journaled overhead `plant_down` and manual adjacent `robot.place(sides.down)` each visibly produced a Potato crop at 0% growth; the manual adjacent call returned `true, nil` and consumed one Potato. The new host-tested `plant_forward_down` validates `minecraft:potato`, the API result, and a one-item count decrease, but has not yet run through OCIA in Minecraft. API results still do not identify resulting world state automatically, so supervised visual verification remains required.
 - **Required mitigation:** Check target state, placement result, inventory delta, resulting solidity, and `robot.compareDown` against a reserved material sample.
 - **Resolution criteria:** Every platform coordinate has a structured verified result, and incorrect or obstructed targets prevent completion.
 
@@ -189,7 +189,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Robot hardware
 - **Risk:** Terrain clearing and tilling require several tools, but component discovery alone does not prove that Wheatley can identify, equip, verify, replace, and return them safely.
-- **Current evidence:** Wheatley has been successfully assembled and booted with Inventory and Inventory Controller Upgrades; OpenOS reports `inventory_controller` available. `equip()`, detailed inventory inspection, external access, and replacement-tool flow remain untested. Refined Storage, not the robot, will craft tools.
+- **Current evidence:** Wheatley has been successfully assembled and booted with Inventory and Inventory Controller Upgrades; OpenOS reports `inventory_controller` available. During the supervised tilling probe, the robot UI visibly showed an equipped Stone Hoe and `robot.durability()` returned `1.0`; the tool then successfully tilled through manual `robot.use(sides.down)`. API-driven `equip()`, detailed inventory inspection, external access, and replacement-tool flow remain untested in game. Refined Storage, not the robot, will craft tools.
 - **Required mitigation:** Test reversible `equip()` with an inexpensive tool, record internal/external slot structures, verify durability reporting, and exercise replacement and return through the selected dock inventory.
 - **Resolution criteria:** The assembled robot can identify, extract, equip, use, replace, and return every tool required by the terrain-preparation plan.
 

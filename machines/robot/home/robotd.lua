@@ -3,15 +3,19 @@ local component = require("component")
 local computer = require("computer")
 local event = require("event")
 local robot = require("robot")
+local sides = require("sides")
 
 local configModule = require("ocia.config")
 local executorModule = require("ocia.executor")
+local farmingModule = require("ocia.farming")
 local legacy = require("ocia.legacy")
 local protocol = require("ocia.protocol")
 local state = require("ocia.state")
 
 local config = assert(configModule.load("/etc/ocia.cfg", "robot"))
 local modem = assert(component.modem, "Robot needs a wireless network card")
+local inventoryController = assert(component.inventory_controller,
+  "Robot needs an Inventory Controller Upgrade")
 assert(modem.isWireless(), "Robot modem is not wireless")
 assert(modem.address == config.robot_address,
   "Configured robot address does not match this modem")
@@ -22,14 +26,13 @@ if not modem.isOpen(config.port) then
   openedHere = true
 end
 
-local actions = {
-  move_forward = robot.forward,
-  move_backward = robot.back,
-  turn_left = robot.turnLeft,
-  turn_right = robot.turnRight,
-  move_up = robot.up,
-  move_down = robot.down
-}
+local actions = farmingModule.new(robot, sides, inventoryController)
+actions.move_forward = robot.forward
+actions.move_backward = robot.back
+actions.turn_left = robot.turnLeft
+actions.turn_right = robot.turnRight
+actions.move_up = robot.up
+actions.move_down = robot.down
 
 local store = state.journalStore(config.state_path, {
   recent_limit = config.recent_results
@@ -39,10 +42,10 @@ local commandExecutor = executorModule.new({
   recent_limit = config.recent_results,
   compact_records = config.compact_records,
   compact_bytes = config.compact_bytes,
-  perform = function(operation)
+  perform = function(operation, arguments)
     local action = actions[operation]
     if not action then return false, "unsupported physical operation" end
-    return action()
+    return action(arguments)
   end,
   status_provider = function()
     return {

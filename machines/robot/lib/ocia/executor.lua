@@ -207,7 +207,8 @@ function executor:handle(request)
       tostring(appendReason), self:statusPayload())
   end
 
-  local callOk, operationOk, detail = pcall(self.perform, request.operation)
+  local callOk, operationOk, detail, operationFields = pcall(
+    self.perform, request.operation, request.arguments)
   if not callOk then
     self:lock("operation raised an exception", operationOk)
     return result("recovery_required", "operation_exception",
@@ -233,6 +234,7 @@ function executor:handle(request)
   payload.mode = "ready"
   payload.code = code
   payload.message = message
+  if type(operationFields) == "table" then merge(payload, operationFields) end
   local statusOk, extra = pcall(self.status_provider)
   if statusOk and type(extra) == "table" then merge(payload, extra) end
   local payloadRaw, encodeReason = protocol.encodeFields(payload)

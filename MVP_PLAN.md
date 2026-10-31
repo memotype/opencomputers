@@ -248,6 +248,12 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 | 9 | Farm-action portion of Phase 10 |
 | 10 | Complete Phase 10 Potato farm deployment |
 
+### Interim supervised vertical slice: first Potato patch
+
+The immediate priority is a deliberately small playable experiment ahead of the remaining milestone sequence. Journaled `till_forward_down` has converted Grass to visibly identified Farmland, and both journaled overhead `plant_down` and manual adjacent `robot.place(sides.down)` have produced visibly identified Potato crops. The next gate is the simplified journaled adjacent till-and-plant pair, followed by the fixed two-cell and 3x3 routes. This is not Milestone 1 completion and is not the autonomous Potato Farm MVP: it assumes an operator-prepared flat irrigated plot, a manually equipped hoe, a known Potato slot, clearance, and a trusted staging pose.
+
+The simplified prototype tills and plants each cell from one adjacent crop-height pose. The 3x3 fixed route uses one unplanted perimeter cell to reach the center, exits, then works around the exterior; host geometry checks prohibit movement into planted cells. It intentionally omits surveying, provisioning, irrigation, generalized pathfinding, autonomous recovery, and return-to-charger behavior. Its runbook is [POTATO_PATCH.md](POTATO_PATCH.md).
+
 ### Milestone 1: Addressed and recoverable command transport
 
 **Status:** Implemented, host-tested, deployed, and partially accepted in supervised OpenOS/Minecraft testing on 2026-10-30. Addressed status, commissioning, legacy invalidation/recovery, four physical operations, retained duplicate suppression, conflict rejection, and normal completed-state restart recovery passed. Compaction, lost reply, interrupted `prepared`/`executing`, post-restart duplicate replay, and observed stale-epoch rejection remain pending; do not treat this milestone as complete.
@@ -429,9 +435,9 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ## Immediate Coding Milestone
 
-Milestone 1 code is implemented and host-tested: the latest recorded baselines are 29 Lua 5.3 tests / 6350 assertions and 25 deployment tests / 152 assertions, all passing. The 18-entry deployment and core supervised transport/movement session also passed. The next gate is the remaining controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
+Milestone 1 remains partially accepted; its controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md) is deliberately deferred, not waived. The immediate coding and in-game gate is the supervised one-cell farming interaction in [POTATO_PATCH.md](POTATO_PATCH.md), followed by its two-cell and 3x3 stages only when the physical geometry works.
 
-After that acceptance passes, proceed to Milestone 2 hardware characterization and durable controller-side pose/session work. Do not add Geolyzer routing, RS calls, planning, or construction until the transport's actual OpenOS filesystem, modem, duplicate, timeout, and recovery behavior is recorded.
+Keep this vertical slice narrow. Do not add Geolyzer routing, RS calls, terrain planning, provisioning, or generalized construction around it. After the playable experiment, use what it reveals to choose between returning to deferred Milestone 1 acceptance and advancing the relevant hardware/interaction milestones.
 
 ## Immediate In-Game Experiments
 
