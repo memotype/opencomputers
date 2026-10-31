@@ -252,7 +252,7 @@ The detailed chronological evidence, exact epochs, request IDs, physical observa
 
 | Step | Status | Evidence |
 |---:|---|---|
-| 1 | Passed | Both discovered modem identities were rendered into the generated configurations. The 18-entry manifest installed successfully, all 18 entries were subsequently `UNCHANGED`, both programs loaded configuration, and addressed communication succeeded. Foreign-sender behavior was not part of this step. |
+| 1 | Passed | The positive configuration and communication path passed: both discovered modem identities were rendered into the generated configurations, the 18-entry manifest installed successfully, all 18 entries were subsequently `UNCHANGED`, both programs loaded configuration, and addressed communication succeeded. Deliberately mismatched local modem-address startup rejection remains untested in game; foreign-sender rejection is separate and was not part of this step. |
 | 2 | Passed | `ocia-recover reset-origin` required `RESET`, created an epoch, and an independent `show` read back trusted origin, high water `0`, and a healthy journal. |
 | 3 | Passed for normal restart | The daemon started `ready`, was interrupted while idle, restarted without a port-open assertion, and recovered completed state. The observed `Ctrl+Alt+C` interruption emits a stack trace and is not graceful shutdown. |
 | 4 | Passed | Read-only `ociactl` returned correlated success, trusted origin, epoch/high water, journal, energy, and memory without movement or physical sequence allocation. |
@@ -274,4 +274,4 @@ Additional evidence beyond the numbered checklist:
 - Green charging particles and a 303-unit reported energy increase after return provide positive charging evidence, but no controlled charge detector, docking logic, or negative controls were tested.
 - The short session completed without an observed out-of-memory failure. Variable free-memory readings do not prove long-running stability or diagnose garbage collection.
 
-Steps 1–9 are ordinary supervised acceptance. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until the pending compaction, lost-reply, interrupted-execution, post-restart duplicate, and stale-epoch gates are completed and the relevant `ISSUES.md` acceptance criteria are satisfied.
+Steps 1–9 are ordinary supervised acceptance. The negative modem-mismatch case from step 1 remains to be exercised deliberately. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until the pending modem-mismatch, compaction, lost-reply, interrupted-execution, post-restart duplicate, and stale-epoch gates are completed and the relevant `ISSUES.md` acceptance criteria are satisfied.

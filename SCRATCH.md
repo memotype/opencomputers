@@ -133,7 +133,7 @@ The legacy path remains `(command, count)` with reply `("result", command, ok, d
 
 This path has been tested successfully in Minecraft. For example, `drive> f 4` returned `OK: OK`, reported battery state, and physically moved the robot four blocks.
 
-The controller originally asserted an unconditional `modem.open(4242)`, which failed when the port was already open. Repository versions of `drive.lua`, `ociactl.lua`, and `robotd.lua` now check `modem.isOpen(4242)` and close the port only when that process opened it. The robot-side behavior and controller coexistence still require in-game acceptance under OCIA-006 and OCIA-007.
+The controller originally asserted an unconditional `modem.open(4242)`, which failed when the port was already open. Repository versions of `drive.lua`, `ociactl.lua`, and `robotd.lua` now check `modem.isOpen(4242)` and close the port only when that process opened it. In-game acceptance demonstrated an idle `robotd` interruption and normal restart without a port-open assertion, resumed wireless status service, and sequential `ociactl`, `drive`, then `ociactl` use. The hard interruption emitted a stack trace rather than shutting down gracefully; concurrent event consumers, concurrent port ownership, and broader ownership/interruption edge cases remain untested under OCIA-006 and OCIA-007.
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
 
@@ -901,7 +901,7 @@ For charging, measure robot energy at the expected charging pose with the Lever 
 ## Handoff Notes
 
 - Existing source and unrelated user changes must be preserved carefully.
-- Repository code now has guarded, owned port handling on both endpoints; only the older controller guard has prior in-game evidence, so the new daemon behavior remains pending.
+- Robot daemon restart and resumed communication after an idle interruption, plus sequential legacy and OCIA controller use, are demonstrated in OpenOS. Broader concurrency, graceful shutdown, and unusual port-ownership failure cases remain untested.
 - Legacy physical driving intentionally marks autonomous pose untrusted. Return to origin facing North and use the local recovery tool before autonomous work resumes.
 - Full completed results are retained only for the configured recent window. OpenOS now demonstrates epoch creation/rotation, contiguous high water through sequence 4, retained duplicate suppression before restart, and two retained results across a normal restart. Retirement, stale-packet rejection, compaction, and sustained memory/disk cost remain unverified in game.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
