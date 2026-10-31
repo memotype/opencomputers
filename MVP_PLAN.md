@@ -26,7 +26,7 @@ Implementation decisions must preserve four evidence classes:
 
 Current demonstrated foundations are remote robot movement, wireless acknowledgments, Charger activation and stationary charging, native RS connectivity and inventory enumeration, Wheatley's integrated APU GPU, Inventory Controller and Geolyzer component discovery, adjacent Geolyzer analysis, and small three-dimensional Geolyzer scans.
 
-The RS mutation APIs, inventory transfer, tool swapping, autonomous pose tracking, survey coordinate transforms, terrain modification, machine placement, autonomous docking, and end-to-end recovery are not yet demonstrated.
+The RS mutation APIs, inventory transfer, tool swapping, controller-owned durable deployment pose, survey coordinate transforms, terrain modification, machine placement, autonomous docking, and end-to-end recovery are not yet demonstrated. Robot-side relative pose has been matched to supervised turns and one-block translations and survived a normal daemon restart.
 
 ## Feasibility Assessment
 
@@ -250,7 +250,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ### Milestone 1: Addressed and recoverable command transport
 
-**Status:** Implemented in the repository and host-tested on 2026-10-30; supervised OpenOS/Minecraft acceptance is pending. Do not treat this milestone as complete yet.
+**Status:** Implemented, host-tested, deployed, and partially accepted in supervised OpenOS/Minecraft testing on 2026-10-30. Addressed status, commissioning, legacy invalidation/recovery, four physical operations, retained duplicate suppression, conflict rejection, and normal completed-state restart recovery passed. Compaction, lost reply, interrupted `prepared`/`executing`, post-restart duplicate replay, and observed stale-epoch rejection remain pending; do not treat this milestone as complete.
 
 **Goal:** Execute one correlated, bounded request without breaking manual control.
 
@@ -264,7 +264,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 **Failure/recovery:** Timeout leaves the controller in an ambiguous state until status reconciliation. A restart from `prepared` records definite nonexecution if that resolution persists. A restart from `executing` reports unknown physical outcome, invalidates trusted pose, and never replays the request.
 
-**Unresolved dependencies:** The confirmed controller and robot modem UUIDs are recorded in ignored host configuration and generate both OpenOS configuration files, but that installer update has not yet been applied to the live HDDs. The new daemon, append-only journal, compaction, epoch commissioning, actual modem behavior, duplicate and retired-request handling, movement, and recovery path require the supervised procedure in [MILESTONE1.md](MILESTONE1.md). OpenOS memory, disk, flush, rename, and timing behavior remain unmeasured.
+**Unresolved dependencies:** The 18 managed files, including generated configuration, are installed and idempotent in the live world. Core modem, movement, pose, epoch, high-water, retained-result, legacy invalidation, recommissioning, and normal restart behavior is demonstrated. The remaining acceptance gate is controlled compaction, lost-reply, interrupted-request, post-restart duplicate, retired/stale request, foreign-sender, and sustained resource/filesystem testing in [MILESTONE1.md](MILESTONE1.md). Controller deployment state remains unimplemented, and crash durability is unproven.
 
 ### Milestone 2: Durable pose, energy, and hardware primitives
 
@@ -429,7 +429,7 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ## Immediate Coding Milestone
 
-Milestone 1 code is implemented and host-tested: 29 Lua 5.3 tests with 6350 assertions pass on 2026-10-30. The role-based source layout and host deployment installer add a separate 16-test fixture suite; they do not change the milestone protocol requirements. The next gate is supervised deployment and the in-game acceptance procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
+Milestone 1 code is implemented and host-tested: the latest recorded baselines are 29 Lua 5.3 tests / 6350 assertions and 25 deployment tests / 152 assertions, all passing. The 18-entry deployment and core supervised transport/movement session also passed. The next gate is the remaining controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md), not more protocol scope.
 
 After that acceptance passes, proceed to Milestone 2 hardware characterization and durable controller-side pose/session work. Do not add Geolyzer routing, RS calls, planning, or construction until the transport's actual OpenOS filesystem, modem, duplicate, timeout, and recovery behavior is recorded.
 

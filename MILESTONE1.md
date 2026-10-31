@@ -2,7 +2,7 @@
 
 This runbook covers the addressed, recoverable command transport implemented for Milestone 1. Durable architecture remains in [CODEX.md](CODEX.md), current project state in [SCRATCH.md](SCRATCH.md), risks in [ISSUES.md](ISSUES.md), and the dependency roadmap in [MVP_PLAN.md](MVP_PLAN.md).
 
-Milestone 1 is implemented and host-tested. It is not accepted until the supervised OpenOS and Minecraft checks below have recorded real results.
+Milestone 1 is implemented, host-tested, deployed, and partially accepted. The core supervised transport and movement checks below have recorded real results; controlled compaction and fault-injection gates remain before full acceptance.
 
 ## Protocol Contract
 
@@ -81,7 +81,13 @@ Both controller programs and the daemon close port 4242 only if they opened it. 
 
 ## Configuration and Diagnostics
 
-On each OpenOS computer, obtain the full local wireless modem address with `components -l modem` or:
+On each OpenOS computer, obtain the full local wireless modem address with:
+
+```sh
+components modem
+```
+
+On the tested OpenOS 1.8.8 installation, `components -l modem` displayed usage rather than the modem address. The Lua alternative is:
 
 ```sh
 lua -e 'print(require("component").modem.address)'
@@ -240,4 +246,32 @@ Use a clear, player-loaded test area. Keep Wheatley away from unsafe adjacent bl
 13. Test an interrupted `executing` record only through a disposable safe hook. On restart, expect `recovery_required`, untrusted unchanged recorded pose, and a matching retry with `physical_outcome_unknown`. Neither matching nor conflicting retries may invoke a Robot API call. In the same disposable setup, perform an intentional legacy manual recovery movement, restart again, and retry the original identifier: it must remain `physical_outcome_unknown`, with no autonomous Robot API call; conflicting reuse must remain rejected.
 14. After any legacy physical movement or ambiguous test, manually restore Wheatley to the origin facing North, stop the daemon, inspect with `ocia-recover.lua show`, explicitly commission a new epoch, restart, and confirm status. A saved old-epoch request must then receive `stale_epoch`.
 
-Steps 1–9 are ordinary supervised acceptance. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until actual results are recorded in `SCRATCH.md` and the relevant `ISSUES.md` acceptance criteria are satisfied.
+### Acceptance results recorded 2026-10-30
+
+The detailed chronological evidence, exact epochs, request IDs, physical observations, energy, and memory readings are preserved in [SCRATCH.md](SCRATCH.md#milestone-1-supervised-in-game-acceptance-session-2026-10-30). Classifications below apply only to what was actually observed.
+
+| Step | Status | Evidence |
+|---:|---|---|
+| 1 | Passed | Both discovered modem identities were rendered into the generated configurations. The 18-entry manifest installed successfully, all 18 entries were subsequently `UNCHANGED`, both programs loaded configuration, and addressed communication succeeded. Foreign-sender behavior was not part of this step. |
+| 2 | Passed | `ocia-recover reset-origin` required `RESET`, created an epoch, and an independent `show` read back trusted origin, high water `0`, and a healthy journal. |
+| 3 | Passed for normal restart | The daemon started `ready`, was interrupted while idle, restarted without a port-open assertion, and recovered completed state. The observed `Ctrl+Alt+C` interruption emits a stack trace and is not graceful shutdown. |
+| 4 | Passed | Read-only `ociactl` returned correlated success, trusted origin, epoch/high water, journal, energy, and memory without movement or physical sequence allocation. |
+| 5 | Partially verified | Legacy `status` and sequential coexistence with OCIA worked, but the session performed legacy physical movement before status. That movement correctly invalidated autonomous pose, so the isolated status-only variant remains untested. |
+| 6 | Passed | Automatically allocated sequence 1 turned Wheatley exactly once from North to West and updated trusted heading. |
+| 7 | Passed | Repeating sequence 1 with the identical `turn_left` request returned the cached result with `duplicate=true`; no second turn occurred. |
+| 8 | Passed | Reusing sequence 1 for `turn_right` returned definitive `request_id_conflict`; no action occurred and pose/high water remained unchanged. |
+| 9 | Passed | Automatically allocated sequence 2 moved exactly one block West and changed reported pose from `(0,0,0)` to `(-1,0,0)`. |
+| 10 | Pending | No compaction was performed. Observed generation `1` came from commissioning and is not compaction evidence. |
+| 11 | Pending | No reply was deliberately suppressed. Normal duplicate replay is not a lost-reply test. |
+| 12 | Pending | No controlled interruption after `prepared` was injected. |
+| 13 | Pending | No controlled interruption after `executing` or ambiguity-preservation sequence was injected. |
+| 14 | Partially verified | Actual legacy movement, durable invalidation, physical return, explicit recommissioning, new epoch, and restart all passed. No old-epoch packet was transmitted, so observed `stale_epoch` rejection remains pending. |
+
+Additional evidence beyond the numbered checklist:
+
+- A normal daemon restart recovered the second epoch, trusted `(-1,0,0)` West pose, high water `2`, and two retained completed results from a healthy seven-record/1825-byte journal. The retained request was not replayed after restart.
+- Sequences 3 and 4 moved Wheatley back to `(0,0,0)` and turned him North. These were operator-selected one-step autonomous commands, not route planning.
+- Green charging particles and a 303-unit reported energy increase after return provide positive charging evidence, but no controlled charge detector, docking logic, or negative controls were tested.
+- The short session completed without an observed out-of-memory failure. Variable free-memory readings do not prove long-running stability or diagnose garbage collection.
+
+Steps 1–9 are ordinary supervised acceptance. Steps 10–14 require controlled setups and must not be improvised by killing Minecraft during a survival-world action. Milestone 1 remains in progress until the pending compaction, lost-reply, interrupted-execution, post-restart duplicate, and stale-epoch gates are completed and the relevant `ISSUES.md` acceptance criteria are satisfied.

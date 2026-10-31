@@ -18,7 +18,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Wireless transport
 - **Risk:** Every robot listening on port 4242 may execute a command intended for one robot.
-- **Current evidence:** The implemented OCIA transport uses `modem.send` to the configured robot and validates reply sender/local recipient in host tests. Legacy `drive.lua` intentionally remains broadcast for manual compatibility, and the robot restricts it to the configured controller. No two-robot in-game test has run.
+- **Current evidence:** The implemented OCIA transport uses `modem.send` to the configured robot and validates reply sender/local recipient in host tests. In game, the configured controller successfully exchanged addressed status and four physical requests with Wheatley. Legacy `drive.lua` intentionally remains broadcast for manual compatibility, and the robot restricts it to the configured controller. No foreign-sender or two-robot isolation test has run.
 - **Required mitigation:** Send construction traffic to a configured robot modem address and reject replies from other senders.
 - **Resolution criteria:** A two-robot test demonstrates that only the addressed robot executes a deployment command.
 
@@ -27,7 +27,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Wireless protocol
 - **Risk:** A stale, duplicated, or unrelated reply can be mistaken for the result of the current operation.
-- **Current evidence:** Version 1 requests/replies include request, deployment, operation, and protocol identity. Host tests show stale replies and wrong senders are ignored. Legacy manual requests still contain only command/count and are not an autonomous state source.
+- **Current evidence:** Version 1 requests/replies include request, deployment, operation, and protocol identity. In game, automatically allocated physical sequences 1 through 4 correlated with the intended operations; an identical replay of sequence 1 returned its cached result without movement, while conflicting reuse returned `request_id_conflict` without movement. Host tests additionally show stale replies and wrong senders are ignored. Legacy manual requests still contain only command/count and are not an autonomous state source.
 - **Required mitigation:** Add protocol version, request ID, operation name, and deployment ID fields and validate all correlation fields.
 - **Resolution criteria:** Delayed and duplicate replies cannot advance controller state incorrectly.
 
@@ -36,7 +36,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Recovery and idempotency
 - **Risk:** Retrying a movement or turn after a lost reply may execute the action twice and corrupt the robot pose.
-- **Current evidence:** The robot appends `prepared` then `executing`, records completed results, returns retained duplicates without another physical call, and marks restart from `executing` as recovery-required. Hardening fixed source defects that had mislabeled a matching unresolved retry as retired both directly and after a durable legacy-manual recovery record. The unresolved identity now survives manual recovery and restart, returns `physical_outcome_unknown`, preserves untrusted pose, validates conflicts, and never invokes the physical callback. Explicit origin recommissioning retires the old epoch. Filesystem-backed restart and fault injection tests pass; OpenOS persistence, manual-after-ambiguity, and supervised lost-reply behavior are untested in game.
+- **Current evidence:** The robot appends `prepared` then `executing`, records completed results, returns retained duplicates without another physical call, and marks restart from `executing` as recovery-required. In game, an identical retained sequence-1 replay returned the cached result and did not turn Wheatley again; conflicting reuse was rejected. A normal idle daemon restart recovered two completed results, but the duplicate was not retried after restart. Host fault tests cover unresolved identity through restart and manual recovery. Lost-reply, interrupted-`prepared`, interrupted-`executing`, and manual-after-ambiguity behavior remain untested in game.
 - **Required mitigation:** Journal in-flight and completed requests on the robot, cache completed results, and enter recovery-required state after an interrupted in-flight action.
 - **Resolution criteria:** Duplicate completed requests return their original result without repeating the action; interrupted requests are not replayed automatically; and an unresolved executing retry reports unknown outcome rather than definite rejection in a supervised OpenOS test.
 
@@ -45,7 +45,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Navigation
 - **Risk:** Construction planning cannot reliably map relative blueprint coordinates to physical robot actions.
-- **Current evidence:** Pure relative-pose logic and robot-side durable pose exist and pass cardinal/turn/failure/ambiguity host tests. The controller probe validates and displays reported pose, but a durable authoritative controller deployment pose and in-game agreement tests do not exist yet.
+- **Current evidence:** Pure relative-pose logic and robot-side durable pose pass host tests. In game, North-to-West and West-to-North turns matched physical heading; forward West changed `(0,0,0)` to `(-1,0,0)`, and backward returned to the origin. Trusted pose survived a normal daemon restart and agreed with physical observation. `ociactl` displays robot-reported pose, but a durable authoritative controller deployment pose and partial-operation agreement tests do not exist.
 - **Required mitigation:** Define a relative coordinate system and update controller and robot pose only after successful operations.
 - **Resolution criteria:** Movement and turn tests produce matching controller and robot poses, including partial-operation failures.
 
@@ -54,7 +54,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Persistence
 - **Risk:** A program, computer, game, or host restart can lose the authoritative step and cause repeated or skipped construction.
-- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Bounded compaction writes and verifies a checkpoint plus retained results using `.switch`, `.new`, `.old`, and same-filesystem renames; incomplete replacement artifacts fail closed. Inspection of the installed 1.8.8 JAR shows successful component close returns no value while an HDD-handle close exception can propagate; journal writes now catch that exception and mark persistence uncertain. Host restart/failure tests cover write, flush, raised close, replacement, and replay boundaries. The host installer now manages generated `/etc/ocia.cfg` files through an exact manifest entry, while fixture tests prove the journal, replacement artifacts, and unlisted files remain untouched. Controller deployment state is not implemented, and host tests cannot prove OpenOS, world-save, `fsync`-equivalent, or power-loss durability.
+- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. In game, commissioning persisted a healthy checkpoint; legacy invalidation survived daemon stop; explicit recommissioning created a new epoch; and a normal restart recovered trusted pose, epoch, high water `2`, and two completed results from a healthy journal. The 18-file installer manifest left journal state untouched. Host tests cover compaction and write/flush/close/replacement faults, but in-game compaction, partial writes, sudden power loss, and interrupted physical records remain untested. Controller deployment state is not implemented.
 - **Required mitigation:** Persist versioned controller deployment state and robot execution state using replace-safe writes.
 - **Resolution criteria:** Restart tests either resume from an unambiguous checkpoint or stop with an explicit recovery requirement.
 
@@ -63,7 +63,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Robot daemon
 - **Risk:** Restarting `robotd.lua` can fail when port 4242 is already open.
-- **Current evidence:** The repository daemon now checks `isOpen`, records whether it opened the port, and closes only its own open action. Repeated restart has not yet been exercised in OpenOS.
+- **Current evidence:** The daemon checks `isOpen`, records whether it opened the port, and closes only its own open action. In OpenOS, an idle daemon was hard-interrupted with `Ctrl+Alt+C`, restarted, listened on port 4242 without a port-open assertion, returned to `ready`, and resumed wireless status service. Graceful shutdown and broader repeated/concurrent ownership cases remain untested.
 - **Required mitigation:** Check `modem.isOpen` before opening and define whether the daemon owns and closes the port.
 - **Resolution criteria:** The daemon can be stopped and restarted repeatedly without a port-open assertion failure.
 
@@ -72,7 +72,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Controller transport
 - **Risk:** `drive.lua` closes port 4242 on exit even when another program originally opened it.
-- **Current evidence:** Repository `drive.lua` and `ociactl.lua` now track `openedHere` and close only when they opened the port. Concurrent programs still consume a shared event queue and must not be run together; in-game coexistence acceptance is pending.
+- **Current evidence:** Repository `drive.lua` and `ociactl.lua` track `openedHere` and close only when they opened the port. Sequential in-game use of `ociactl`, `drive`, and `ociactl` again succeeded; OCIA status remained available after legacy movement. Concurrent programs still consume a shared event queue and must not be run together; concurrent ownership remains untested.
 - **Required mitigation:** Record whether the program opened the port and close it only when it owns that action, or centralize modem ownership.
 - **Resolution criteria:** Exiting the manual driver does not disrupt another controller service using port 4242.
 
@@ -90,7 +90,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Command authorization
 - **Risk:** Another computer within range can move the robot or change the world.
-- **Current evidence:** Repository `robotd.lua` accepts both OCIA and legacy packets only from the configured controller address and logs other senders. The ignored host configuration now records both confirmed modem identities and deterministically generates each machine's `/etc/ocia.cfg`; deployment of those generated files and the in-game foreign-sender test remain pending. This is routing protection, not authentication.
+- **Current evidence:** Repository `robotd.lua` accepts both OCIA and legacy packets only from the configured controller address and logs other senders. Both generated configurations were deployed, passed local-address validation, and supported successful controller-to-Wheatley OCIA and legacy communication. No foreign-sender rejection test has run in Minecraft. This is routing protection, not authentication.
 - **Required mitigation:** Configure an allowed controller address and reject construction traffic from other senders. Define an intentional pairing or recovery procedure.
 - **Resolution criteria:** Commands from an unconfigured modem are logged and ignored.
 
@@ -99,7 +99,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Execution granularity
 - **Risk:** A command such as `f 8` can partially succeed, but controller state depends on parsing a human-readable error string.
-- **Current evidence:** OCIA autonomous requests expose only one-block movement and one-turn operations with structured results. Legacy manual commands retain counts 1–8 and coarse replies; they invalidate autonomous pose before physical execution. In-game pose/result verification is pending.
+- **Current evidence:** OCIA autonomous requests expose only one-block movement and one-turn operations with structured results. In game, four one-step autonomous operations returned structured success and matched physical pose transitions. Legacy counted movement (`f 2`) also worked and durably invalidated autonomous pose before/around manual execution as designed; its replies remain coarse and non-authoritative for autonomous pose.
 - **Required mitigation:** Use one physical operation per construction request or return structured completed-step data.
 - **Resolution criteria:** Controller pose is updated from structured results without parsing prose.
 
@@ -135,7 +135,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Power management
 - **Risk:** A deployment may begin with insufficient energy and stop away from its recovery location.
-- **Current evidence:** Energy is reported but not used as an execution precondition. A conduit-powered OpenComputers Charger has restored Wheatley successfully after a Lever supplied the required redstone activation signal. A Tier 2 Battery Upgrade is installed and boots, but its observed capacity and endurance have not been characterized.
+- **Current evidence:** Energy is reported but not used as an execution precondition. The installed Tier 2 Battery reported a `35500`-unit capacity during the supervised session. Four autonomous operations and a normal daemon restart completed without energy failure; after commanded return to the dock, energy rose from `35196` to `35499` with charging particles visible. This is useful short-session evidence, not a characterized operation budget or reserve policy.
 - **Required mitigation:** Measure idle, movement, analyze, scan, excavation, and return energy costs; establish conservative preflight and reserve thresholds; and enter recovery before the reserve is exhausted. Charging-station verification is tracked by OCIA-035.
 - **Resolution criteria:** The Battery's observed buffer is recorded, deployment is refused below the configured reserve, tested plans account for return energy, and low-energy execution stops while Wheatley can still reach or be recovered at the station.
 
@@ -171,7 +171,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Wireless protocol
 - **Risk:** Large plans or highly structured replies can exceed OpenComputers packet-size or packet-part limits.
-- **Current evidence:** Default OpenComputers configuration limits packets to eight data parts and 8192 bytes. Protocol version 1 uses exactly eight parts and rejects encoded request/result payloads over 4096 bytes in host tests. Actual installed packet behavior remains untested.
+- **Current evidence:** Default OpenComputers configuration limits packets to eight data parts and 8192 bytes. Protocol version 1 uses exactly eight parts and rejects encoded request/result payloads over 4096 bytes in host tests. Installed OpenComputers successfully carried status, four physical operations, duplicate replay, and conflict rejection using the eight-part protocol. Boundary-size and oversize behavior remain untested in game.
 - **Required mitigation:** Send bounded single-operation messages, serialize compact argument/result payloads, and validate payload size before transmission.
 - **Resolution criteria:** Maximum supported requests remain within configured limits and oversized requests fail locally with a clear error.
 
@@ -297,7 +297,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Charging and recovery
 - **Risk:** The robot may reach the nominal station while misaligned, unpowered, or beside a Charger whose required redstone activation is disabled, then falsely report a successful return.
-- **Current evidence:** The conduit-powered Charger directly north of Wheatley's resting pose restored him only after its Lever activated it. The dock geometry is observed, but autonomous return, alignment, energy-increase detection, charge waiting, and resume have not been tested.
+- **Current evidence:** The conduit-powered Charger directly north of Wheatley's origin requires its Lever. Operator-issued autonomous one-step commands returned Wheatley from `(-1,0,0)` West to `(0,0,0)` North. Green particles appeared and reported energy rose by 303 units near the dock. This supports physical charging at the known pose, but no automatic return decision, route planning, alignment detection, controlled charge interval, lever-off/misalignment controls, full-buffer handling, waiting, or resume was tested.
 - **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
 - **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
 
@@ -306,7 +306,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Protocol retention
 - **Risk:** If high water or epoch identity is not durable across compaction and recovery, a delayed duplicate could become executable; if the bounded journal still exceeds OpenOS memory, disk, or timing limits, Wheatley may fail closed during a mission.
-- **Current evidence:** The source now uses explicit execution epochs, contiguous physical sequences, and a durable high-water marker. It retains a bounded recent window (default 32, maximum 64), safely rejects older active-epoch requests as `retired_request`, compacts the journal, and rejects prior-epoch packets after explicit origin recommissioning. Unresolved execution identity survives legacy manual recovery until that deliberate epoch rotation, while ordinary completed-result retirement remains bounded. Host tests run 1000 operations with bounded records/bytes and verify retained duplicates, retired requests, compaction restart, manual-after-ambiguity restart, and stale epochs. OpenOS resource use and filesystem behavior are unmeasured.
+- **Current evidence:** The source uses execution epochs, contiguous physical sequences, durable high water, bounded recent results, compaction, and stale-epoch rejection. In OpenOS, explicit commissioning and recommissioning created two distinct epochs; sequences 1–4 executed contiguously in the second epoch; high water and two retained results survived a normal restart; and short-session memory readings remained within the `786432`-byte total without observed OOM. A retained duplicate was suppressed before restart. Compaction, retirement, post-restart duplicate replay, stale-epoch packet rejection, sustained resource use, and in-flight recovery remain untested in game; host tests cover them.
 - **Required mitigation:** Validate bounded retention, compaction, retired-request rejection, and explicit epoch rotation on Wheatley's OpenOS filesystem. Measure journal size, memory, and persist time under the production configuration. Never create a new epoch except at an explicit safe boundary with physically reconciled pose.
 - **Resolution criteria:** An in-game test demonstrates bounded storage across compaction, retained duplicates remain suppressed, retired active-epoch sequences cannot execute, a new epoch is created only through explicit origin recovery, and prior-epoch packets are rejected within measured memory/disk limits.
 

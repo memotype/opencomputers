@@ -10,10 +10,10 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Controller program: `machines/controller/home/drive.lua`
 - Robot program: `machines/robot/home/robotd.lua`
 - Wireless port: `4242`
-- Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Supervised OpenOS/Minecraft protocol acceptance remains pending.
+- Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Core supervised transport, movement, duplicate/conflict handling, commissioning, and normal restart tests passed on 2026-10-30; compaction and fault-injection acceptance remain pending, so Milestone 1 is partially accepted rather than complete.
 - `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. Its effective manifest is now 8 controller files and 10 robot files, including one generated `/etc/ocia.cfg` per role; journal state remains excluded.
 - `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save, two HDD UUIDs, and two confirmed modem UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
-- The original 16 application/template files were successfully installed and verified against the live FTB instance before this change. Generated `/etc/ocia.cfg` support is host-tested only and has not been applied to the live world.
+- The full 18-entry manifest is installed in the live world. Both generated `/etc/ocia.cfg` files loaded successfully in OpenOS, and a post-apply dry run reported all 18 entries `UNCHANGED`.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
 - The first full farm target is now a conventional Potato farm. Sugar Cane and other special crops are deferred to crop-specific blueprints.
@@ -129,7 +129,7 @@ This asymmetric geometry is a useful fixed fixture for calibrating Geolyzer arra
 - `q` or `quit` exits the driver.
 - Movement accepts an optional count from 1 through 8, such as `f 4`.
 
-The legacy path remains `(command, count)` with reply `("result", command, ok, detail, energy, capacity)`. The repository version of `robotd.lua` now also supports the isolated OCIA version 1 protocol, addressed single-operation dispatch, durable duplicate suppression, and explicit recovery state. These changes are host-tested but not yet demonstrated in Minecraft.
+The legacy path remains `(command, count)` with reply `("result", command, ok, detail, energy, capacity)`. The repository version of `robotd.lua` also supports the isolated OCIA version 1 protocol, addressed single-operation dispatch, durable duplicate suppression, and explicit recovery state. Core legacy compatibility, OCIA status/movement, retained duplicate suppression, conflict rejection, and normal restart behavior are now demonstrated in Minecraft; the controlled fault cases remain pending.
 
 This path has been tested successfully in Minecraft. For example, `drive> f 4` returned `OK: OK`, reported battery state, and physically moved the robot four blocks.
 
@@ -137,7 +137,7 @@ The controller originally asserted an unconditional `modem.open(4242)`, which fa
 
 Do not replace or substantially rewrite this working control path without inspecting and preserving its recovery value.
 
-### Milestone 1 implementation awaiting in-game acceptance
+### Milestone 1 implementation partially accepted in game
 
 Implemented logical source paths:
 
@@ -159,7 +159,142 @@ Host result on 2026-10-30: the prior hardening pass ended at 26 tests / 6262 ass
 
 The installed `OpenComputers-MC1.12.2-1.8.8+8da357f.jar` was inspected directly for close semantics. The filesystem component's successful `close` callback returns no values, and the OpenOS buffered handle therefore normally returns `nil` on success; `nil` cannot be treated as a failure indicator. The HDD-backed handle calls `RandomAccessFile.close()`, and a raised close exception propagates through the component invocation. Journal writes now catch that exceptional path and fail closed as an uncertain write; journal verification also rejects a raised close error. Host fault tests cover close exceptions at `prepared`, `executing`, `completed`, and compaction boundaries. This handling does not provide `fsync`, power-loss durability, or proof of real OpenOS behavior, which remain in-game acceptance concerns.
 
-Deployment installer result on 2026-10-30: `tests/deploy_test.lua` passes 25 tests / 152 assertions with Lua 5.3 and LuaFileSystem. Fixtures cover disk and modem validation, deterministic template rendering, dry-run purity, role selection, generated create/update/unchanged behavior, byte-preserving backups, journal and unlisted-file preservation, idempotence, unsafe paths, nonzero CLI errors, and injected staging/backup/replacement failures. No live world was used for the generated-configuration work.
+Deployment installer result on 2026-10-30: `tests/deploy_test.lua` passes 25 tests / 152 assertions with Lua 5.3 and LuaFileSystem. Fixtures cover disk and modem validation, deterministic template rendering, dry-run purity, role selection, generated create/update/unchanged behavior, byte-preserving backups, journal and unlisted-file preservation, idempotence, unsafe paths, nonzero CLI errors, and injected staging/backup/replacement failures. Those fixture results used no live world; the subsequent supervised session below separately deployed and loaded the generated configuration.
+
+### Milestone 1 Supervised In-Game Acceptance Session: 2026-10-30
+
+This session exercised the installed Milestone 1 software in the established survival world using Minecraft 1.12.2, The 1.12.2 Pack 1.6.6, OpenComputers `1.8.8+8da357f`, OpenOS 1.8.8, Lua 5.3, the Tier 2 stationary controller, and Wheatley with Tier 2 wireless networking on port 4242. Both machines have approximately 768 KiB RAM. The Ubuntu 26.04 host deployed directly into the world-save HDD directories with `deploy.lua` while Minecraft remained running.
+
+The working installed command for modem discovery was:
+
+```sh
+components modem
+```
+
+`components -l modem` displayed usage information on this OpenOS installation and must not be used in the runbook. The Lua alternative also remains valid:
+
+```sh
+lua -e 'print(require("component").modem.address)'
+```
+
+The discovered machine identities were recorded only in ignored `deploy.local.lua`; no local disk/modem UUID or world path belongs in tracked documentation.
+
+#### Deployment and generated configuration
+
+Before apply, the 18-entry dry run reported:
+
+| Action | Controller | Robot | Total |
+|---|---:|---:|---:|
+| `UNCHANGED` | 6 | 8 | 14 |
+| `UPDATE` | 1 | 1 | 2 |
+| `CREATE` | 1 | 1 | 2 |
+| Total | 8 | 10 | 18 |
+
+The updates were the two role-specific `etc/ocia.cfg.example` files; the creates were the generated controller and robot `etc/ocia.cfg` files. The operator ran `lua5.3 deploy.lua --apply`. The installer reported all four changed files installed and verified, and created a backup run for the replaced templates. A subsequent `lua5.3 deploy.lua` reported all 18 entries `UNCHANGED` and made no changes.
+
+```text
+INSTALLED controller etc/ocia.cfg.example
+INSTALLED controller etc/ocia.cfg (generated)
+INSTALLED robot etc/ocia.cfg.example
+INSTALLED robot etc/ocia.cfg (generated)
+Apply complete: 4 file(s) installed and verified.
+```
+
+**Result: passed.** This demonstrated the real role-to-HDD mapping, generated configuration installation, post-copy verification, content idempotency, and preservation of the other 14 files. It did not exercise live-world installer fault handling or arbitrary crash consistency; those remain host-fixture evidence only.
+
+#### Initial fail-closed state and commissioning
+
+The first `robotd` start loaded the installed modules and generated configuration, validated the local modem, listened on port 4242, and reported:
+
+```text
+Autonomous mode: recovery_required
+Startup reconciliation: uninitialized
+```
+
+This was the expected uncommissioned state. With the daemon stopped, `ocia-recover show` reported untrusted placeholder pose `(0,0,0)` North, empty epoch, high water `0`, no retained results, and an uninitialized zero-record journal. No physical request had executed.
+
+The operator physically verified Wheatley at the charging origin facing North, with the Charger north, Ender Chest south, and factory wall east. `ocia-recover reset-origin` required the literal `RESET` confirmation and created the first epoch:
+
+```text
+5257242e-2809-4721-a076-560475398dcc
+```
+
+An independent `ocia-recover show` then reported `ready`, trusted `(0,0,0)` North, high water `0`, zero retained results, and a healthy generation-1 journal with one record and 213 bytes. This is durable OpenOS readback after a normal command completion, not proof of power-loss or interrupted-write durability.
+
+#### Daemon interruption convention
+
+Ordinary `Ctrl+C` did not stop `robotd` while it was blocked in `event.pull("modem_message")`. On this installation, `Ctrl+Alt+C` interrupted it and returned to the shell with an `interrupted` stack trace near the event loop. This is a hard operational interrupt, not a graceful shutdown implementation and not evidence of journal corruption. It was used only while the daemon was idle.
+
+#### First OCIA status exchange
+
+After restart, `robotd` reported `ready`. Running `ociactl` with no operation returned `Certainty: succeeded`, `Status: succeeded`, trusted `(0,0,0)` North, energy `35499/35500`, memory `493066/786432`, the first epoch at high water `0`, and a healthy one-record/213-byte generation-1 journal. Wheatley did not move and the physical sequence remained zero.
+
+**Result: passed.** Addressed request/reply transport, parsing, diagnostics, configured identities, and read-only sequence behavior worked in game. Foreign-sender rejection and multiple-robot isolation were not tested.
+
+#### Legacy compatibility, durable pose invalidation, and recommissioning
+
+The legacy driver ran `l`, `f 2`, `status`, then `q`. Wheatley physically turned left and moved two blocks West; the driver returned successful legacy replies and battery readings. The legacy `READY` status is its own convention and does not mean autonomous pose remained trusted.
+
+A following `ociactl` status reported `recovery_required`, untrusted last-recorded `(0,0,0)` North, the first epoch still at high water `0`, a healthy journal with three records/293 bytes, and no retained physical results. Legacy movement therefore invalidated autonomous pose without consuming an autonomous sequence.
+
+The operator used legacy controls to return Wheatley physically to the dock facing North. After an idle `Ctrl+Alt+C`, `ocia-recover show` still reported `legacy manual movement`, untrusted pose, the first epoch at high water `0`, and a healthy five-record/373-byte journal. The invalidation survived daemon stop and independent recovery inspection.
+
+After physical verification, another confirmed `reset-origin` created the second epoch:
+
+```text
+0284cd90-3f91-4238-bd8d-13e8aa37070b
+```
+
+Recovery readback and a fresh controller status both reported trusted `(0,0,0)` North, high water `0`, and a healthy one-record/213-byte generation-1 journal. The first epoch was deliberately superseded. An old first-epoch packet was not actually transmitted, so in-game `stale_epoch` rejection remains pending.
+
+#### Autonomous request ledger and replay tests
+
+All successful autonomous physical requests in the second epoch were:
+
+| Sequence | Request ID / operation | Observed and reported final pose | Result |
+|---:|---|---|---|
+| 1 | `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:1` / `turn_left` | `(0,0,0)` West | Succeeded |
+| 2 | `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:2` / `move_forward` | `(-1,0,0)` West | Succeeded |
+| 3 | `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:3` / `move_backward` | `(0,0,0)` West | Succeeded |
+| 4 | `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:4` / `turn_right` | `(0,0,0)` North | Succeeded |
+
+The full first request ID was `p:0284cd90-3f91-4238-bd8d-13e8aa37070b:1`. `ociactl left` turned Wheatley exactly once from North to West and returned `operation_succeeded` with trusted pose. Repeating the same operation with the same ID returned the cached result with `duplicate=true`; Wheatley did not turn again.
+
+Reusing sequence 1 for `right` returned the successful negative result `rejected / request_id_conflict` with the message that the sequence had different request contents. No right turn occurred. Status remained trusted `(0,0,0)` West at high water `1`, with one retained result and a healthy four-record/1015-byte journal.
+
+`ociactl forward` automatically allocated sequence 2. Wheatley physically moved exactly one block West, and the reported pose changed to `(-1,0,0)` West. A following status showed high water `2`, two retained results, and a healthy seven-record/1825-byte journal whose latest request was sequence 2 `move_forward / succeeded`.
+
+#### Normal daemon restart recovery
+
+With Wheatley idle at `(-1,0,0)` West, the daemon was interrupted with `Ctrl+Alt+C` and restarted. It returned to `ready`; status recovered the same second epoch, high water `2`, trusted pose, both retained results, and the same healthy journal dimensions. Wireless communication resumed without recommissioning or a port-open assertion.
+
+**Result: passed for normal restart after completed operations.** This does not cover an interrupted `prepared` or `executing` record, sudden power loss, or crash consistency. The retained sequence-1 request was not replayed after this restart, so post-restart duplicate suppression remains a separate pending test.
+
+#### Commanded return to the dock and charging evidence
+
+`ociactl back` allocated sequence 3 and moved Wheatley one block East to `(0,0,0)` West. `ociactl right` allocated sequence 4 and turned him North. Physical observation agreed with the final trusted origin pose. These were manually selected one-step autonomous commands, not an autonomous route planner or return-to-base decision.
+
+Green charging particles were visible after return. Reported energy fell from `35415/35500` before daemon restart to `35196/35500` after the backward return, then rose to `35499/35500` at the final turn response—a 303-unit increase while at the dock. This is positive evidence that the active Charger restored energy, but it is not controlled charge-rate measurement, alignment detection, full-charge detection, low-energy policy, or automatic docking/resume.
+
+#### Runtime resource observations
+
+The robot reported total memory `786432` bytes. Representative free-memory readings were `493066`, `377473`, `495304`, `145915`, `368588`, and `486397` bytes at different points. No out-of-memory failure occurred during this short session. The variation may involve garbage collection, but the session did not measure collector activity and does not establish either a leak or long-running memory stability. Similarly, displayed `last write 0 ms` values have limited timer resolution and do not prove instantaneous or crash-durable storage.
+
+#### Acceptance conclusion and remaining gates
+
+Milestone 1 is **partially accepted**. The live session passed deployment/configuration, fail-closed initialization, explicit commissioning, addressed status, legacy compatibility and durable invalidation, manual recovery/recommissioning, first turn and translation, retained duplicate suppression, conflicting-ID rejection, contiguous sequencing through 4, normal completed-state restart recovery, and commanded physical return to the dock.
+
+Still pending:
+
+1. Retry an identical retained request after a normal daemon restart and confirm cached response with no movement.
+2. Send a recorded old-epoch request and observe `stale_epoch` with no movement.
+3. Exercise journal compaction in a controlled setup, then verify generation, bounded size, restart, retained and retired behavior, and restore production settings.
+4. Suppress a successful reply in a safe harness; verify controller certainty `unknown` and identical-ID recovery without another physical action.
+5. Inject interruption after durable `prepared`; verify `interrupted_before_execution`, `physical_outcome=not_started`, unchanged trusted pose, and no replay.
+6. Inject interruption after durable `executing`; verify unknown physical outcome, untrusted pose, matching/conflicting retry behavior, persistence through legacy recovery/restart, and explicit-epoch retirement.
+7. Separately test foreign senders, a second addressed robot, malformed live packets, component exceptions, sustained memory/disk behavior, and power-loss boundaries.
+
+The fault-injection tests must use controlled hooks or disposable setups. Killing Minecraft during a survival-world physical action is not a test harness; it is just a creative way to manufacture ambiguity.
 
 ### OpenOS REPL behavior
 
@@ -561,7 +696,7 @@ Goal: provide correlated, addressed requests while retaining manual driving.
 
 Related risks: OCIA-001, OCIA-002, OCIA-006, OCIA-007, OCIA-009, OCIA-010, OCIA-020.
 
-Implementation status: repository code and host tests are complete for the Milestone 1 subset. Modem UUID configuration and supervised in-game acceptance remain pending.
+Implementation status: repository code, host tests, generated modem configuration, deployment, and core supervised request/reply acceptance are complete for the Milestone 1 subset. Foreign-sender/two-robot isolation and the remaining fault-tolerance gates are pending.
 
 ### Phase 2: Add robot execution state and safe primitives
 
@@ -580,7 +715,7 @@ Goal: turn `robotd.lua` into a recoverable execution agent.
 
 Related risks: OCIA-003, OCIA-004, OCIA-005, OCIA-008, OCIA-010, OCIA-014.
 
-Implementation status: the Milestone 1 subset—relative pose, append-only physical-request journal, explicit epoch commissioning, bounded recent-result cache, safe retirement, compaction, protected movement dispatch, and local origin reset—is host-tested. Controller deployment checkpoints, hardware primitives, and all in-game acceptance remain pending for later work.
+Implementation status: the Milestone 1 subset—relative pose, append-only physical-request journal, explicit epoch commissioning, bounded recent-result cache, safe retirement, compaction, protected movement dispatch, and local origin reset—is host-tested. Commissioning, physical turn/translation pose, duplicate/conflict behavior, legacy invalidation/recommissioning, and normal completed-state restart recovery are also demonstrated in game. Compaction, retirement/stale replay, lost reply, interrupted execution, controller deployment checkpoints, and broader hardware primitives remain pending.
 
 ### Phase 3: Implement verified dirt placement
 
@@ -740,12 +875,12 @@ Related risks: OCIA-019, OCIA-021.
 
 Deploy and accept Milestone 1 using [MILESTONE1.md](MILESTONE1.md):
 
-1. Review the ignored `deploy.local.lua` world, HDD, and confirmed modem mappings, then run the default dry run without applying to inspect all 18 actions, especially both generated `/etc/ocia.cfg` updates.
-2. After human review, apply the installer separately and confirm a second dry run reports all 18 entries `UNCHANGED`; manually restart affected OpenOS programs as needed.
-3. With Wheatley physically at the origin facing North and the daemon stopped, inspect state and explicitly run `ocia-recover.lua reset-origin` to create the first execution epoch.
-4. Start `robotd.lua`, verify restart-safe port handling, then run the default read-only `ociactl.lua` status probe and record epoch/high-water/journal diagnostics.
-5. Confirm legacy `drive.lua status`, one automatically numbered supervised turn, one clear-area movement, cached duplicate and conflicting reuse behavior, and compaction/restart behavior.
-6. Use only safe harnesses for lost-reply, interrupted-`prepared`, interrupted-`executing`, and manual recovery after an ambiguous execution. Verify the unresolved request remains unknown across the manual record and another restart until explicit epoch recommissioning. Record actual results before changing Milestone 1 or related issues to mitigated/complete.
+1. While Wheatley is idle in a safe pose, restart `robotd` and retry an exactly retained request ID/operation; confirm a cached response and no physical action.
+2. Send a recorded physical request ID from the superseded first epoch; confirm `stale_epoch` and no movement without recommissioning merely to arrange the test.
+3. Exercise compaction with safe turns or a controlled minimum threshold. Verify generation increase, bounded records/bytes, pose/epoch/high-water persistence, retained/retired behavior, restart recovery, then restore production configuration.
+4. Use a safe receive-side harness to suppress one successful reply. Confirm controller certainty `unknown`, then retry only the identical ID/operation and observe the cached result without another action.
+5. Use controlled hooks for interrupted-`prepared` and interrupted-`executing` boundaries. Verify the exact classifications and no-replay guarantees in [MILESTONE1.md](MILESTONE1.md); do not improvise by killing Minecraft during a physical action.
+6. Complete the ambiguous-execution legacy/manual/restart test, then physically reconcile and explicitly commission a new epoch. Keep foreign-sender, second-robot isolation, malformed live packet, component-error, sustained-resource, and power-loss tests visible as separate remaining coverage.
 
 The next Refined Storage validation session should execute Phase 6 Tests A through F in order. Tests A and B are read-only; Test C should use an inexpensive recipe; Tests D and E should move one ordinary Dirt through a dedicated adjacent chest. Record exact return values, side constants, physical inventory changes, and failure behavior before writing the provisioning module.
 
@@ -768,13 +903,13 @@ For charging, measure robot energy at the expected charging pose with the Lever 
 - Existing source and unrelated user changes must be preserved carefully.
 - Repository code now has guarded, owned port handling on both endpoints; only the older controller guard has prior in-game evidence, so the new daemon behavior remains pending.
 - Legacy physical driving intentionally marks autonomous pose untrusted. Return to origin facing North and use the local recovery tool before autonomous work resumes.
-- Full completed results are retained only for the configured recent window, but the durable epoch/high-water pair prevents retired sequences from executing again. Explicit origin recovery creates a new epoch and makes all prior-epoch packets stale. This behavior and its memory/disk cost remain unverified on OpenOS.
+- Full completed results are retained only for the configured recent window. OpenOS now demonstrates epoch creation/rotation, contiguous high water through sequence 4, retained duplicate suppression before restart, and two retained results across a normal restart. Retirement, stale-packet rejection, compaction, and sustained memory/disk cost remain unverified in game.
 - Official OpenComputers source for the `1.12.2-forge/1.8.8` tag confirms that `robot.compareDown` is available without an Inventory Controller Upgrade.
 - Detailed item-stack inspection requires the now-installed Inventory Controller Upgrade; its operational methods remain untested.
 - The Inventory Controller Upgrade does not identify terrain blocks.
 - Installed 1.8.8 code exposes no general `robot.inspect*`; detailed adjacent block analysis belongs to Wheatley's installed Geolyzer.
 - Geolyzer density scans and adjacent analysis are demonstrated, but coordinate mapping and production thresholds are not.
 - Ordinary robot placement requires a supporting surface unless Angel placement is available.
-- The verified Charger requires redstone activation in normal mode; autonomous docking and positive charging verification remain untested.
+- The verified Charger requires redstone activation in normal mode. Charging particles and an energy increase were observed after commanded return to the dock, but controlled charge-rate/negative tests and autonomous docking remain untested.
 - OpenComputers defaults permit at most eight packet data parts and 8192 bytes per packet; keep messages compact.
 - Do not implement mandatory Dead Bush return logic; it is an optional legacy trigger only.

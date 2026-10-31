@@ -69,6 +69,8 @@ Source changes occur in Git and reach live HDDs only through an explicit, allowl
 
 Development-time deployment while Minecraft and OpenOS programs are running is permitted. The installer does not inspect, stop, restart, or coordinate processes. An active Lua process may retain loaded code, so the developer restarts the relevant OpenOS program manually when needed. Individual file replacement is staged, but a multi-file deployment is not one atomic transaction and may briefly expose mixed versions to a process loading modules during the copy.
 
+On the installed OpenOS 1.8.8 system, `Ctrl+Alt+C` interrupts a daemon blocked in `event.pull`; ordinary `Ctrl+C` did not interrupt `robotd`. The current hard interrupt emits an `interrupted` stack trace and is an idle-time operating workaround, not graceful shutdown or a recovery mechanism.
+
 ## Robot Hardware Principles
 
 The active construction robot is a Tier 2 OpenComputers robot. Its Tier 2 APU supplies both processor and GPU functionality; a separate Graphics Card is redundant when the APU GPU is present and verified. Do not reintroduce one as a requirement merely because a conventional computer build would contain a separate card.
