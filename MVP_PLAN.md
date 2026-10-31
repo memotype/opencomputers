@@ -250,9 +250,9 @@ These milestones refine, rather than replace, the phase summary in `SCRATCH.md`.
 
 ### Interim supervised vertical slice: first Potato patch
 
-The immediate priority is a deliberately small playable experiment ahead of the remaining milestone sequence. Journaled `till_forward_down` has converted Grass to visibly identified Farmland, and both journaled overhead `plant_down` and manual adjacent `robot.place(sides.down)` have produced visibly identified Potato crops. The next gate is the simplified journaled adjacent till-and-plant pair, followed by the fixed two-cell and 3x3 routes. This is not Milestone 1 completion and is not the autonomous Potato Farm MVP: it assumes an operator-prepared flat irrigated plot, a manually equipped hoe, a known Potato slot, clearance, and a trusted staging pose.
+The deliberately small playable experiment ahead of the remaining milestone sequence has succeeded: journaled adjacent tilling and planting completed the single-cell and two-cell stages, followed by a complete supervised 3x3 run using the parameterized reverse-serpentine route. This is not Milestone 1 completion and is not the autonomous Potato Farm MVP: it assumes an operator-prepared flat irrigated plot, a manually equipped hoe, a known Potato slot, clearance, and a trusted staging pose.
 
-The simplified prototype tills and plants each cell from one adjacent crop-height pose. The 3x3 fixed route uses one unplanted perimeter cell to reach the center, exits, then works around the exterior; host geometry checks prohibit movement into planted cells. It intentionally omits surveying, provisioning, irrigation, generalized pathfinding, autonomous recovery, and return-to-charger behavior. Its runbook is [POTATO_PATCH.md](POTATO_PATCH.md).
+The simplified prototype tills and plants each cell from one adjacent crop-height pose. Its rectangular planner traverses columns in a serpentine order, using unplanted crop spaces as its corridor and backing away from each completed cell. Host geometry checks prohibit movement into planted cells. It intentionally omits surveying, provisioning, irrigation, generalized pathfinding, autonomous recovery, and return-to-charger behavior. Its runbook is [POTATO_PATCH.md](POTATO_PATCH.md).
 
 ### Milestone 1: Addressed and recoverable command transport
 
@@ -435,7 +435,7 @@ The simplified prototype tills and plants each cell from one adjacent crop-heigh
 
 ## Immediate Coding Milestone
 
-Milestone 1 remains partially accepted; its controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md) is deliberately deferred, not waived. The immediate coding and in-game gate is the supervised one-cell farming interaction in [POTATO_PATCH.md](POTATO_PATCH.md), followed by its two-cell and 3x3 stages only when the physical geometry works.
+Milestone 1 remains partially accepted; its controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md) is deliberately deferred, not waived. The supervised single-cell, two-cell, and 3x3 reverse-serpentine runs in [POTATO_PATCH.md](POTATO_PATCH.md) have now completed successfully; use that vertical-slice evidence to select the next project gate without treating it as the autonomous Potato Farm MVP.
 
 Keep this vertical slice narrow. Do not add Geolyzer routing, RS calls, terrain planning, provisioning, or generalized construction around it. After the playable experiment, use what it reveals to choose between returning to deferred Milestone 1 acceptance and advancing the relevant hardware/interaction milestones.
 

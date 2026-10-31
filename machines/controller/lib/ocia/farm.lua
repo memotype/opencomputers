@@ -36,6 +36,14 @@ local function builder(slot)
     end
   end
 
+  function value:backward(count)
+    for _ = 1, count or 1 do
+      self:add("move_backward")
+      local vector = vectors[self.heading]
+      self.x, self.z = self.x - vector.x, self.z - vector.z
+    end
+  end
+
   function value:target(cell)
     local vector = vectors[self.heading]
     assert(self.x + vector.x == cell.x and self.z + vector.z == cell.z,
@@ -74,37 +82,127 @@ local function pairPlan(slot)
   return route, cells
 end
 
-local function patchPlan(slot)
+local function opposite(heading)
+  return ({north = "south", south = "north", east = "west", west = "east"})[heading]
+end
+
+local function direction(from, to)
+  local dx, dz = to.x - from.x, to.z - from.z
+  if dx == 1 and dz == 0 then return "east" end
+  if dx == -1 and dz == 0 then return "west" end
+  if dx == 0 and dz == 1 then return "north" end
+  if dx == 0 and dz == -1 then return "south" end
+  return nil
+end
+
+local function serpentineCells(width, depth)
+  local cells = {}
+  for x = 0, width - 1 do
+    if x % 2 == 0 then
+      for z = 0, depth - 1 do cells[#cells + 1] = cell(x, z) end
+    else
+      for z = depth - 1, 0, -1 do cells[#cells + 1] = cell(x, z) end
+    end
+  end
+  return cells
+end
+
+local function validatePatch(route, cells)
+  local function key(x, z) return x .. "," .. z end
+  local targets, tilled, planted = {}, {}, {}
+  for _, target in ipairs(cells) do
+    local targetKey = key(target.x, target.z)
+    if targets[targetKey] then return nil, "generated route repeats a target cell" end
+    targets[targetKey] = true
+  end
+  local finishKey = key(route.x, route.z)
+  if targets[finishKey] then return nil, "generated route does not finish outside the plot" end
+  local allowed = {[key(0, -1)] = true, [finishKey] = true}
+  for targetKey in pairs(targets) do allowed[targetKey] = true end
+
+  local x, z, heading = 0, -1, "north"
+  for _, step in ipairs(route.steps) do
+    if step.operation == "turn_left" then
+      heading = ({north = "west", west = "south", south = "east", east = "north"})[heading]
+    elseif step.operation == "turn_right" then
+      heading = ({north = "east", east = "south", south = "west", west = "north"})[heading]
+    elseif step.operation == "move_forward" or step.operation == "move_backward" then
+      local vector = vectors[heading]
+      local sign = step.operation == "move_forward" and 1 or -1
+      x, z = x + vector.x * sign, z + vector.z * sign
+      if planted[key(x, z)] then return nil, "generated route enters a planted cell" end
+      if not allowed[key(x, z)] then return nil, "generated route exceeds documented clearance" end
+    elseif step.operation == "till_forward_down"
+        or step.operation == "plant_forward_down" then
+      local vector = vectors[heading]
+      local targetKey = key(x + vector.x, z + vector.z)
+      if not targets[targetKey] or not step.cell
+          or key(step.cell.x, step.cell.z) ~= targetKey then
+        return nil, "generated farming action targets the wrong cell"
+      end
+      if step.operation == "till_forward_down" then
+        if tilled[targetKey] then return nil, "generated route tills a cell more than once" end
+        tilled[targetKey] = key(x, z) .. ":" .. heading
+      else
+        if not tilled[targetKey] then return nil, "generated route plants before tilling" end
+        if planted[targetKey] then return nil, "generated route plants a cell more than once" end
+        if tilled[targetKey] ~= key(x, z) .. ":" .. heading then
+          return nil, "generated route tills and plants from different poses"
+        end
+        planted[targetKey] = true
+      end
+    else
+      return nil, "generated route contains an unsupported operation"
+    end
+  end
+  for targetKey in pairs(targets) do
+    if not planted[targetKey] then return nil, "generated route leaves a cell unplanted" end
+  end
+  return true
+end
+
+local function patchPlan(slot, width, depth)
   local route = builder(slot)
-  local cells = {
-    cell(0, 0), cell(1, 0), cell(2, 0),
-    cell(0, 1), cell(1, 1), cell(2, 1),
-    cell(0, 2), cell(1, 2), cell(2, 2)
-  }
+  local cells = serpentineCells(width, depth)
+  if #cells == 1 then
+    route:farm(cells[1])
+    local ok, reason = validatePatch(route, cells)
+    if not ok then return nil, nil, reason end
+    return route, cells
+  end
 
-  -- Enter through the unplanted bottom-middle crop space, farm the otherwise
-  -- inaccessible center, and exit before sealing that access cell.
-  route:turn("east"); route:forward(); route:turn("north"); route:forward()
-  route:farm(cells[5])
-  route:turn("south"); route:forward(); route:turn("north")
+  -- Reach P1 through unplanted crop spaces, then face P0.
+  if depth > 1 then
+    route:forward(2)
+    route:turn("south")
+  else
+    route:forward()
+    route:turn("east")
+    route:forward()
+    route:turn("west")
+  end
 
-  -- Complete the perimeter from the exterior ring. No later movement enters a
-  -- target crop space, so every planted cell remains outside the robot path.
-  route:farm(cells[2])
-  route:turn("east"); route:forward(); route:turn("north"); route:farm(cells[3])
-  route:turn("east"); route:forward(); route:turn("north"); route:forward(2)
-  route:turn("west"); route:farm(cells[6])
-  route:turn("north"); route:forward(); route:turn("west"); route:farm(cells[9])
-  route:turn("north"); route:forward(); route:turn("west"); route:forward(2)
-  route:turn("south"); route:farm(cells[8])
-  route:turn("west"); route:forward(); route:turn("south"); route:farm(cells[7])
-  route:turn("west"); route:forward(); route:turn("south"); route:forward(2)
-  route:turn("east"); route:farm(cells[4])
-  route:turn("south"); route:forward(); route:turn("east"); route:farm(cells[1])
+  -- Farm Pi from P(i+1), then turn so backing up enters P(i+2).
+  for index = 1, #cells - 1 do
+    route:farm(cells[index])
+    if index < #cells - 1 then
+      local travel = assert(direction(cells[index + 1], cells[index + 2]),
+        "serpentine cells must be adjacent")
+      route:turn(opposite(travel))
+      route:backward()
+    end
+  end
+
+  -- Continue the final reverse movement outside the footprint, then farm the
+  -- last cell without ever re-entering a planted crop space.
+  route:backward()
+  route:farm(cells[#cells])
+  local ok, reason = validatePatch(route, cells)
+  if not ok then return nil, nil, reason end
   return route, cells
 end
 
-function farm.plan(stage, slot)
+function farm.plan(stage, slot, width, depth)
   stage = stage or "single"
   if stage ~= "single" and stage ~= "single-plant"
       and stage ~= "pair" and stage ~= "patch" then
@@ -114,18 +212,42 @@ function farm.plan(stage, slot)
   if not slot or slot ~= math.floor(slot) or slot < 1 or slot > 16 then
     return nil, "potato slot must be an integer from 1 through 16"
   end
+  width, depth = tonumber(width or 3), tonumber(depth or 3)
+  if not width or width ~= math.floor(width) or width < 1 or width > 16 then
+    return nil, "width must be an integer from 1 through 16"
+  end
+  if not depth or depth ~= math.floor(depth) or depth < 1 or depth > 16 then
+    return nil, "depth must be an integer from 1 through 16"
+  end
+  if width * depth > 64 then return nil, "plot may contain at most 64 cells" end
 
   local route, cells
   if stage == "single" then route, cells = singlePlan(slot, false)
   elseif stage == "single-plant" then route, cells = singlePlan(slot, true)
   elseif stage == "pair" then route, cells = pairPlan(slot)
-  else route, cells = patchPlan(slot) end
+  else
+    local reason
+    route, cells, reason = patchPlan(slot, width, depth)
+    if not route then return nil, reason end
+  end
 
   local tillCount = stage == "single-plant" and 0 or #cells
+  local movements, turns = 0, 0
+  for _, step in ipairs(route.steps) do
+    if step.operation == "move_forward" or step.operation == "move_backward" then
+      movements = movements + 1
+    elseif step.operation == "turn_left" or step.operation == "turn_right" then
+      turns = turns + 1
+    end
+  end
   return {stage = stage, slot = slot, cells = cells, steps = route.steps,
     till_count = tillCount, plant_count = #cells,
+    width = stage == "patch" and width or #cells,
+    depth = stage == "patch" and depth or 1,
+    movement_count = movements, turn_count = turns,
     local_end = {x = route.x, z = route.z, heading = route.heading},
-    assumptions = "prepared_clearance_and_exterior_access_required"}
+    clearance = {start = {x = 0, z = -1}, finish = {x = route.x, z = route.z}},
+    assumptions = "crop_height_footprint_plus_reported_start_and_exit_clearance"}
 end
 
 function farm.poseFromStatus(status)
@@ -153,6 +275,14 @@ function farm.targetForCell(startPose, target)
   return {x = startPose.x + forward.x * (target.z + 1) + right.x * target.x,
     y = startPose.y - 1,
     z = startPose.z + forward.z * (target.z + 1) + right.z * target.x}
+end
+
+function farm.positionForLocal(startPose, position)
+  local forward = assert(pose.headings[startPose.heading])
+  local right = assert(pose.headings[forward.right])
+  return {x = startPose.x + forward.x * (position.z + 1) + right.x * position.x,
+    y = startPose.y,
+    z = startPose.z + forward.z * (position.z + 1) + right.z * position.x}
 end
 
 function farm.expectedEnd(plan, startPose)

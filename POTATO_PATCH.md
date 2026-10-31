@@ -59,7 +59,8 @@ Prepare:
 - A Stone Hoe equipped.
 - Enough ordinary Potatoes in the selected slot.
 - Empty crop spaces above every target.
-- Crop-height movement clearance around the full one-block exterior ring.
+- Crop-height movement and turning clearance throughout the plot.
+- Clear initial staging and final exit cells reported by the preview.
 - Manual supervision and a fresh `ready`, trusted status.
 
 The coordinate frame rotates with Wheatley's live heading. The preview prints actual target coordinates and the expected final pose.
@@ -91,24 +92,36 @@ ociafarm plan pair --slot 1
 ociafarm apply pair --slot 1
 ```
 
-## Complete 3x3 patch
+## Rectangular reverse-serpentine patch
 
-The center cannot be reached from the exterior. The fixed route therefore:
-
-1. Moves along the south exterior and enters the still-unplanted bottom-middle crop space.
-2. Tills and plants the center from there.
-3. Exits through the same unplanted access cell.
-4. Tills and plants that access cell from the south exterior.
-5. Completes the other seven perimeter cells while remaining on the exterior ring.
-
-No movement enters a cell after it has been planted. The expected final local pose is `(-1,0)` facing East: outside the west edge beside the southwest target.
+The `patch` stage accepts a width from left to right and a depth forward from the staging edge. Both default to 3. Each dimension must be from 1 through 16, and a plot may contain at most 64 cells.
 
 ```sh
+ociafarm plan patch --width 3 --depth 3 --slot 1
+ociafarm apply patch --width 3 --depth 3 --slot 1
+
+# Equivalent 3x3 defaults:
 ociafarm plan patch --slot 1
-ociafarm apply patch --slot 1
 ```
 
-Inspect every movement, turn, target coordinate, and the final pose before typing `FARM`. The route is host-validated but has not yet been physically run as a complete patch; exterior clearance, robot movement above the temporarily unplanted access soil, and the full sequence remain supervised acceptance assumptions.
+Wheatley enters only unplanted crop spaces. He farms the block ahead, turns when the serpentine changes direction, and backs into the next unplanted space. Once a cell is planted, he never enters it again. For the 3x3 plan, the planting order viewed from above is:
+
+```text
+             North
+               ^
+
+          x=0  x=1  x=2
+
+   z=2     3    4    9
+   z=1     2    5    8
+   z=0     1    6    7
+```
+
+From standard staging at local `(0,-1)` facing North, Wheatley moves into the unplanted footprint to local `(0,1)`, turns South, and begins farming. The 3x3 route uses 34 physical commands: 9 tills, 9 plants, 10 movements, and 6 turns. It exits at local `(2,3)` facing South. Thus its only special exterior spaces are the initial staging cell `(0,-1)` and final exit cell `(2,3)`; it does not require a clear exterior ring.
+
+The same generator handles single rows and columns. A 1x1 patch remains stationary. For every size, the preview prints the ordered world-coordinate targets, complete command sequence, expected final pose, and dimension-dependent exit clearance. Inspect all of them before typing `FARM`.
+
+The reverse-serpentine route subsequently completed a supervised 3x3 patch successfully in Minecraft. Continue to clear the entire crop-height footprint, the reported staging cell, and the reported exit cell before each run. The two earlier 3x3 attempts used the retired perimeter route and stopped safely on exterior Dirt; they were not failures of the farming operations or the reverse-serpentine geometry.
 
 ## Stop and recover safely
 

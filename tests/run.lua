@@ -854,13 +854,18 @@ local function validateFarmGeometry(plan)
   local x, z, heading = 0, -1, "north"
   local tilled, planted = {}, {}
   local function key(px, pz) return px .. "," .. pz end
+  local allowed = {[key(0, -1)] = true,
+    [key(plan.local_end.x, plan.local_end.z)] = true}
+  for _, target in ipairs(plan.cells) do allowed[key(target.x, target.z)] = true end
   for _, step in ipairs(plan.steps) do
     if step.operation == "turn_left" or step.operation == "turn_right" then
       heading = localTurns[heading][step.operation == "turn_left" and "left" or "right"]
-    elseif step.operation == "move_forward" then
+    elseif step.operation == "move_forward" or step.operation == "move_backward" then
       local vector = localVectors[heading]
-      local nx, nz = x + vector.x, z + vector.z
+      local sign = step.operation == "move_forward" and 1 or -1
+      local nx, nz = x + vector.x * sign, z + vector.z * sign
       equal(planted[key(nx, nz)], nil, "route entered a planted crop cell")
+      equal(allowed[key(nx, nz)], true, "route left its documented clearance")
       x, z = nx, nz
     elseif step.operation == "till_forward_down"
         or step.operation == "plant_forward_down" then
@@ -921,39 +926,99 @@ test("farm blueprints generate deterministic one-pass adjacent routes", function
   equal(pairPlanted["0,0"], true)
   equal(pairPlanted["1,0"], true)
 
-  local patch = assert(farm.plan("patch", 1))
-  equal(#patch.cells, 9)
-  equal(patch.till_count, 9)
-  equal(patch.plant_count, 9)
-  local expectedCells = {{0, 0}, {1, 0}, {2, 0}, {0, 1}, {1, 1},
-    {2, 1}, {0, 2}, {1, 2}, {2, 2}}
+end)
+
+test("rectangular patches satisfy reverse-serpentine geometry invariants", function()
+  local dimensions = {{1, 1}, {1, 3}, {3, 1}, {2, 2}, {2, 3},
+    {3, 2}, {3, 3}, {3, 4}, {4, 3}, {5, 5}}
+  for _, size in ipairs(dimensions) do
+    local width, depth = size[1], size[2]
+    local plan = assert(farm.plan("patch", 1, width, depth))
+    equal(plan.width, width)
+    equal(plan.depth, depth)
+    equal(#plan.cells, width * depth)
+    equal(plan.till_count, width * depth)
+    equal(plan.plant_count, width * depth)
+    local endX, endZ, endHeading, tilled, planted = validateFarmGeometry(plan)
+    equal(endX, plan.local_end.x)
+    equal(endZ, plan.local_end.z)
+    equal(endHeading, plan.local_end.heading)
+    local seen = {}
+    for _, target in ipairs(plan.cells) do
+      local targetKey = target.x .. "," .. target.z
+      equal(seen[targetKey], nil, "serpentine repeated a target")
+      seen[targetKey] = true
+      equal(tilled[targetKey], true)
+      equal(planted[targetKey], true)
+    end
+    for _, step in ipairs(plan.steps) do
+      truthy(step.operation ~= "move_up" and step.operation ~= "move_down",
+        "flat rectangular route must not change elevation")
+    end
+  end
+
+  equal(farm.plan("patch", 1, 0, 3), nil)
+  equal(farm.plan("patch", 1, 3, 17), nil)
+  equal(farm.plan("patch", 1, 9, 8), nil)
+end)
+
+test("3x3 patch matches the 34-command acceptance fixture", function()
+  local plan = assert(farm.plan("patch", 1, 3, 3))
+  local expectedCells = {{0, 0}, {0, 1}, {0, 2}, {1, 2}, {1, 1},
+    {1, 0}, {2, 0}, {2, 1}, {2, 2}}
   for index, expected in ipairs(expectedCells) do
-    equal(patch.cells[index].x, expected[1])
-    equal(patch.cells[index].z, expected[2])
+    equal(plan.cells[index].x, expected[1])
+    equal(plan.cells[index].z, expected[2])
   end
-  local tillActions, plantActions = 0, 0
-  for _, step in ipairs(patch.steps) do
-    if step.operation == "till_forward_down" then tillActions = tillActions + 1 end
-    if step.operation == "plant_forward_down" then plantActions = plantActions + 1 end
-    truthy(step.operation ~= "move_up" and step.operation ~= "move_down",
-      "one-pass route must not change elevation")
+  local expectedOperations = {
+    "move_forward", "move_forward", "turn_right", "turn_right",
+    "till_forward_down", "plant_forward_down", "move_backward",
+    "till_forward_down", "plant_forward_down", "turn_right", "move_backward",
+    "till_forward_down", "plant_forward_down", "turn_right", "move_backward",
+    "till_forward_down", "plant_forward_down", "move_backward",
+    "till_forward_down", "plant_forward_down", "turn_left", "move_backward",
+    "till_forward_down", "plant_forward_down", "turn_left", "move_backward",
+    "till_forward_down", "plant_forward_down", "move_backward",
+    "till_forward_down", "plant_forward_down", "move_backward",
+    "till_forward_down", "plant_forward_down"
+  }
+  equal(#plan.steps, 34)
+  equal(plan.movement_count, 10)
+  equal(plan.turn_count, 6)
+  for index, operation in ipairs(expectedOperations) do
+    equal(plan.steps[index].operation, operation)
   end
-  equal(tillActions, 9)
-  equal(plantActions, 9)
-  local endX, endZ, endHeading, tilled, planted = validateFarmGeometry(patch)
-  equal(endX, -1)
-  equal(endZ, 0)
-  equal(endHeading, "east")
-  for _, expected in ipairs(expectedCells) do
-    local targetKey = expected[1] .. "," .. expected[2]
-    equal(tilled[targetKey], true)
-    equal(planted[targetKey], true)
+  local endX, endZ, endHeading = validateFarmGeometry(plan)
+  equal(endX, 2)
+  equal(endZ, 3)
+  equal(endHeading, "south")
+end)
+
+test("rectangular patch poses rotate with every initial world heading", function()
+  local plan = assert(farm.plan("patch", 1, 3, 3))
+  local transforms = {
+    north = {forward = {x = 0, z = -1}, right = {x = 1, z = 0}, finish = "south"},
+    east = {forward = {x = 1, z = 0}, right = {x = 0, z = 1}, finish = "west"},
+    south = {forward = {x = 0, z = 1}, right = {x = -1, z = 0}, finish = "north"},
+    west = {forward = {x = -1, z = 0}, right = {x = 0, z = -1}, finish = "east"}
+  }
+  for _, heading in ipairs({"north", "east", "south", "west"}) do
+    local startPose = pose.new(20, 7, -20, heading)
+    local finish = assert(farm.expectedEnd(plan, startPose))
+    local transform = transforms[heading]
+    equal(finish.x, startPose.x + transform.forward.x * 4 + transform.right.x * 2)
+    equal(finish.y, startPose.y)
+    equal(finish.z, startPose.z + transform.forward.z * 4 + transform.right.z * 2)
+    equal(finish.heading, transform.finish)
+    for _, target in ipairs(plan.cells) do
+      local world = farm.targetForCell(startPose, target)
+      equal(world.x, startPose.x + transform.forward.x * (target.z + 1)
+        + transform.right.x * target.x)
+      equal(world.y, startPose.y - 1)
+      equal(world.z, startPose.z + transform.forward.z * (target.z + 1)
+        + transform.right.z * target.x)
+    end
   end
-  local finish = assert(farm.expectedEnd(patch, start))
-  equal(finish.x, start.x - 1)
-  equal(finish.y, start.y)
-  equal(finish.z, start.z - 1)
-  equal(finish.heading, "east")
 end)
 
 test("farm execution completes the route and stops on uncertain outcomes", function()

@@ -9,17 +9,24 @@ local farm = require("ocia.farm")
 local transportModule = require("ocia.transport")
 
 local function usage()
-  io.stderr:write("Usage: ociafarm <plan|apply> <single|single-plant|pair|patch> [--slot 1-16]\n")
+  io.stderr:write("Usage: ociafarm <plan|apply> <single|single-plant|pair|patch> "
+    .. "[--width 1-16] [--depth 1-16] [--slot 1-16]\n")
 end
 
 local arguments = {...}
-local mode, stage, slot = arguments[1], arguments[2], 1
+local mode, stage, slot, width, depth = arguments[1], arguments[2], 1, 3, 3
 if mode ~= "plan" and mode ~= "apply" then usage(); os.exit(2) end
 if not stage then usage(); os.exit(2) end
 local index = 3
 while index <= #arguments do
   if arguments[index] == "--slot" and arguments[index + 1] then
     slot = tonumber(arguments[index + 1])
+    index = index + 2
+  elseif arguments[index] == "--width" and arguments[index + 1] then
+    width = tonumber(arguments[index + 1])
+    index = index + 2
+  elseif arguments[index] == "--depth" and arguments[index + 1] then
+    depth = tonumber(arguments[index + 1])
     index = index + 2
   else
     io.stderr:write("Unknown or incomplete option: " .. tostring(arguments[index]) .. "\n")
@@ -28,7 +35,7 @@ while index <= #arguments do
   end
 end
 
-local plan, planReason = farm.plan(stage, slot)
+local plan, planReason = farm.plan(stage, slot, width, depth)
 if not plan then io.stderr:write(planReason .. "\n"); usage(); os.exit(2) end
 
 local config, configReason = configModule.load("/etc/ocia.cfg", "controller")
@@ -65,14 +72,26 @@ local function run()
   if not endPose then return nil, endReason end
 
   print("Potato prototype: " .. plan.stage)
+  print(string.format("Plot: %dx%d", plan.width, plan.depth))
   print("Start: " .. poseText(startPose))
   print("Expected end: " .. poseText(endPose))
   local summary = string.format("Cells: %d; till actions: %d; plant actions: %d",
     #plan.cells, plan.till_count, plan.plant_count)
   if plan.plant_count > 0 then summary = summary .. "; potato slot: " .. plan.slot end
   print(summary)
+  print(string.format("Movements: %d; turns: %d", plan.movement_count, plan.turn_count))
   print("Total physical commands: " .. #plan.steps)
-  print("Geometry: each cell is tilled and planted forward/downward from one adjacent pose.")
+  if plan.stage == "patch" then
+    print("Geometry: reverse serpentine through unplanted crop spaces.")
+  else
+    print("Geometry: each cell is farmed forward/downward from one adjacent pose.")
+  end
+  local startClearance = farm.positionForLocal(startPose, plan.clearance.start)
+  local exitClearance = farm.positionForLocal(startPose, plan.clearance.finish)
+  print("Initial staging clearance: " .. poseText({x = startClearance.x,
+    y = startClearance.y, z = startClearance.z, heading = startPose.heading}))
+  print("Required final exit clearance: " .. string.format("(%d,%d,%d)",
+    exitClearance.x, exitClearance.y, exitClearance.z))
   print("Target soil cells relative to the live start pose:")
   for number, cell in ipairs(plan.cells) do
     local target = farm.targetForCell(startPose, cell)
