@@ -45,6 +45,13 @@ require("tests.nav_cases").register({
   contains = contains
 })
 
+require("tests.nav_state_cases").register({
+  test = test,
+  equal = equal,
+  truthy = truthy,
+  contains = contains
+})
+
 local statusCounter = 0
 local function request(id, operation, deployment, arguments)
   if operation == "status" and not id then
