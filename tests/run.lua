@@ -1,4 +1,4 @@
--- Host-side Milestone 1 hardening tests. Run from the repository root with Lua 5.3.
+-- Host-side OCIA regression tests. Run from the repository root with Lua 5.3.
 package.path = table.concat({
   "./machines/robot/lib/?.lua",
   "./machines/controller/lib/?.lua",
@@ -37,6 +37,13 @@ local function contains(value, fragment)
     error("expected " .. tostring(value) .. " to contain " .. fragment, 2)
   end
 end
+
+require("tests.nav_cases").register({
+  test = test,
+  equal = equal,
+  truthy = truthy,
+  contains = contains
+})
 
 local statusCounter = 0
 local function request(id, operation, deployment, arguments)
