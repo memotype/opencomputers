@@ -1632,6 +1632,90 @@ No unresolved architectural choice blocks Stages 1–3: home-only starts, coordi
 
 If this design is accepted, `MVP_PLAN.md` should gain a navigation milestone before autonomous terrain preparation, `ISSUES.md` should extend OCIA-004/005/014/016/035 and consider a distinct controller-navigation-history/concurrency risk, and durable navigation principles may later be summarized in `CODEX.md`. Those files are intentionally unchanged during this planning task.
 
+## Planned supervised navigation-plus-one-Potato integration
+
+**Planning status on 2026-11-02: proposed for independent review; implementation is not authorized.** The next narrow vertical slice should combine the accepted navigation mission with the already implemented adjacent single-cell farming operations. It must use the existing controller and robot journals, physical request sequence, result classifier, exact-request recovery, and inverse return. It must not invoke `ociafarm` inside an active navigation mission, create another mission store, change the protocol, or automate broader farming concerns.
+
+### Reusable implementation
+
+- `nav.plan()` and the existing `ocianav` outbound loop provide destination planning, reactive supervised travel, durable travel breadcrumbs, and replanning from actual pose.
+- `nav_state.prepareIntent()`, `recordResult()`, `assessStatus()`, `authorizeRetry()`, and `recordReconciliation()` provide intent-before-send ordering, contiguous physical IDs, exact pending-request recovery, consumed-failure handling, and interference detection.
+- `beginReturn()` plus the existing `ocianav` return loop freeze and invert only successful travel breadcrumbs, then reconcile home and archive.
+- `farm.plan("single", slot)` already supplies the ordered `till_forward_down` and `plant_forward_down` steps. `farm.targetForCell(destinationPose, {x=0,z=0})` computes the soil target one block forward and one block down. `farm.execute()` must not be reused because it allocates physical IDs independently of the navigation journal.
+- Robot `farming.lua` already performs the installed-version interactions. `plant_forward_down` checks the selected internal stack name for `minecraft:potato` and requires exactly one item to be consumed. `executor.lua` already journals both operations as ordinary physical requests and reports their unchanged pose.
+
+### Minimal integration design
+
+Extend the existing version-1 navigation state without adding a journal format or record kind. A Potato mission records a narrow work declaration in the already persisted, checksummed mission `limits` map: `work_kind=single_potato`, integer `work_slot`, and `work_actions=2`. Ordinary navigation missions omit these fields. Mission creation and replay validate the declaration as a unit: the kind must be exactly `single_potato`, the slot must be `1..16`, and the action count must be exactly two. This keeps mission type and selected slot durable across controller restart without adding a parallel state file or changing `state.FORMAT`.
+
+Add a narrow `prepareWorkIntent()` path that is legal only in `at_destination`, only for `till_forward_down` and `plant_forward_down`, and only when `pose.apply()` confirms the expected pose is unchanged. Its existing intent record uses `effect=work` rather than `effect=breadcrumb` and retains the operation arguments, so a pending planting request replays with the original slot and fingerprint. A correlated success consumes high water and physical-action budget, retains the same trusted pose, and appends one completed-work entry; it never appends a travel breadcrumb.
+
+Completed work is reconstructed from the existing ordered `intent` plus `result` records into a bounded `snapshot.work` list. The only valid successful prefix is empty, `till_forward_down`, or `till_forward_down` followed by `plant_forward_down` using the declared slot. Replay rejects duplicate, reordered, extra, wrong-slot, pose-changing, or ordinary-navigation work entries. A controller restart after a durable till result therefore resumes with till complete and plant remaining. A restart with an unresolved work intent retains that exact request and can recover only through the existing identical-ID `resume` path; a successful recovered result is appended once and returns to `at_destination` without automatically authorizing the next stage.
+
+`nav_state` must enforce completion independently of CLI presentation. For an ordinary navigation mission, terminal behavior remains unchanged. For `single_potato`, a `navigation_complete` terminal record is valid only after destination arrival, both ordered work entries, exact home reconciliation, and no pending intent. Returning after zero or one completed work stage is allowed, but terminal outcome must be `aborted` with durable work progress summarized in the reason. Thus a controller restart or alternate caller cannot archive incomplete Potato work as successful merely by calling `terminate()` directly.
+
+### Farming evidence contract
+
+The Robot remains responsible for the installed-version item check: `plant_forward_down` reads `getStackInInternalSlot(slot)`, requires `stack.name == "minecraft:potato"`, calls `robot.place(sides.down)`, and reports the selected slot, item name, before/after counts, and `item_consumed`. The controller must not treat every pose-valid `operation_succeeded` as completed planting. For the work effect, `nav_state.classify()` additionally requires the selected slot to equal the durable mission slot, `item_name == "minecraft:potato"`, `item_consumed == "true"`, integer counts, and `items_after == items_before - 1`. Missing or contradictory success evidence becomes the existing ambiguous/contradictory-result path: retain the exact pending identity, enter recovery-required state, and do not mark planting complete or allocate another ID.
+
+No new journal record kind is needed. `recordResult()` copies a closed scalar allowlist from the correlated work reply into the existing checksummed `result` record: selected slot, item name, before/after counts, consumption flag, interaction geometry, interaction detail, and `world_verification`. Replay builds the completed-work entry from those persisted fields. Definite work failure/nonexecution, local non-send, timeout, ambiguous send, rejection, recovery-required, and persistence faults retain their current sequence and reconciliation semantics; useful wrong-item or empty-slot evidence is preserved on the failure record without being counted as completed work.
+
+These checks establish only **robot-reported planting completion**: the selected internal item was a Potato, the placement API succeeded, and exactly one item disappeared. They do not identify the resulting world block. The durable work entry therefore retains `world_verification=operator_required`; visible Farmland and crop presence remain supervised acceptance observations outside the controller's sensor evidence. `navigation_complete` for this slice means the two requested robot operations, return, and reconciliation completed—not that the software independently inspected a Potato crop.
+
+### Exact action-budget invariant
+
+Let `P` be consumed mission physical actions, `B` successful outbound travel breadcrumbs, `W` remaining Potato work actions, `N` the current nominal remaining outbound cost, and `L` the mission action limit.
+
+- Mission preview/creation requires `P + N + W + (B + N) <= L`; at home this is `2 * route_cost + 2 <= L`.
+- Before every new outbound or reactive physical attempt, reserve its worst successful effect with `P + 1 + W + (B + 1) <= L`. A success consumes one action and adds one return breadcrumb. A definite failure consumes one action but adds no breadcrumb, leaving at least the return and work reservation assumed by the stricter success case.
+- After every reactive result and replan, reevaluate `P + N + W + (B + N) <= L`. If it fails, send no further outbound request; the existing breadcrumbs remain returnable, although the Potato work may be skipped.
+- At destination and before each work request, require `P + W + B <= L`. On work success, both `P` and completed work increase by one, so `W` falls by one and the invariant is preserved. On definite work failure, `P` rises while `W` does not; the failed attempt may consume the remaining completion margin, but `P + B <= L` still holds because the precheck reserved at least the attempted work action. The CLI may then refuse another work attempt while still permitting return.
+- Starting return requires only the existing `P + B <= L`. Work actions are already included in `P` and never inflate `B`. Zero work, till-only, successful work, or a definite farming failure therefore retain enough budget for the same exact breadcrumb inverse, provided no ambiguous request remains pending.
+
+Timeout or another ambiguous work outcome never spends a second budget unit speculatively: it freezes the exact pending request. Only its eventual authoritative cached result decides whether `P` advances and whether `W` decreases; no new request is allowed meanwhile. Charging remains unverified.
+
+### Proposed CLI and operator flow
+
+Use two small additions to `ocianav`:
+
+```text
+ocianav potato --x X --y Y --z Z --heading H [--slot 1]
+ocianav work
+```
+
+`potato` requires an explicit heading because it defines the farming target. Before any state write it prints the live home status, nominal/return route, destination pose, exact forward/down soil coordinate, Potato slot, equipped-Hoe and prepared/irrigated-soil assumptions, two-action work reservation, total budget, and the warning that navigation arrival does not prove crop-height ground geometry. Literal `NAVIGATE` creates the ordinary navigation mission and travels to `at_destination`.
+
+`work` requires the healthy active Potato mission at its exact destination, fresh matching status, no pending request, and sufficient work-plus-return budget. It prints the arrived pose, soil target, slot, completed/remaining work, and manual preconditions. Literal `FARM` executes only the remaining ordered work operations through the navigation journal. It exits after completion or the first failure and tells the operator to inspect Farmland and the Potato crop. It never starts return automatically. The existing `ocianav return` preview and literal `RETURN` confirmation then perform the exact breadcrumb inverse. Existing `status` remains read-only; `resume` gains eligibility and preview handling for a pending stationary work request but never silently starts the next work step.
+
+### Planned code and tests
+
+Production changes should be limited to controller `lib/ocia/nav_state.lua` and `home/ocianav.lua`. `farm.lua`, robot farming/executor code, shared protocol/pose/transport, `ociafarm.lua`, deployment manifest, and journal format remain unchanged. Focused changes belong in `tests/nav_state_cases.lua` and `tests/nav_cli_cases.lua`; existing runners already include them. No additional production file is currently necessary to preserve the existing invariants.
+
+Required regressions are:
+
+1. Travel success creates breadcrumbs; two work successes consume contiguous IDs and action count but create zero additional breadcrumbs; return sends exactly the inverse travel sequence.
+2. Mission creation and every outbound/work boundary reject a budget that cannot cover two work actions plus the current exact return. Partial work still preserves return capacity.
+3. Till failure and plant failure consume their IDs, preserve trusted pose, require fresh reconciliation, stop the invocation, and leave supervised return available. A successful till is not repeated when work resumes.
+4. Timeout, ambiguous send, robot recovery, contradictory pose, or result-persistence uncertainty retains the exact work intent and sends no new ID. Restart plus `resume` can apply one cached result once, with no duplicate work entry or physical call.
+5. `at_destination` permits only the two allowlisted stationary work operations. Work cannot appear in outbound breadcrumbs, a frozen return, or completed return steps; ordinary navigation missions cannot invoke it.
+6. Wrong item, empty slot, or missing one-item consumption stops before work completion and preserves returned evidence. Successful planting records `minecraft:potato`, the selected slot, and before/after count evidence.
+7. Return after till-only or no work archives `aborted`; return after both work operations archives `navigation_complete`. Home reconciliation and archive behavior remain unchanged.
+8. Preview/cancellation tests prove `potato` and `work` confirmations are case-sensitive and cancellation writes no intent or physical request. The target coordinate must rotate correctly for all four destination headings, including nonzero destination Y.
+
+### Supervised Minecraft acceptance
+
+The operator selects a short, visibly safe coordinate and explicit heading near home; no coordinate is assumed by the implementation plan. Prepare one irrigated Dirt or Grass block at the previewed forward/down target, ensure Wheatley will arrive in the adjacent crop-height cell rather than merely hover at an unsuitable elevation, equip a Stone Hoe, and place ordinary Potatoes in slot 1.
+
+From freshly commissioned `(0,0,0)` North with ready/healthy/trusted status and no active controller mission: run `ocianav potato` with the selected coordinate, heading, and slot; inspect the complete preview and type `NAVIGATE`. At `at_destination`, compare the reported pose and target coordinate with the physical worksite. Run `ocianav work`, inspect the work preview, and type `FARM`. Confirm one journaled till and one journaled plant, unchanged pose, `minecraft:potato` slot evidence, a one-item count decrease, visible Farmland, and a visible Potato crop. Then run `ocianav return`, inspect the frozen travel inverse, type `RETURN`, and confirm trusted `(0,0,0)` North, no active mission, and a new archive. The accepted log must show one monotonic physical sequence across travel, both work actions, and return; the two work IDs must be absent from the breadcrumb inverse.
+
+### Review risks and documentation correction
+
+The integration must correct four real assumptions: outbound success currently always means breadcrumb; `at_destination` currently rejects all physical intents; resume validation currently admits only movement operations; and terminal success currently considers only destination arrival. Those are the only navigation-state semantics that should broaden. The existing independent `farm.execute()` sequence allocator is explicitly incompatible with an active navigation mission and remains a standalone prototype path.
+
+World verification remains supervised. A successful hoe call does not prove Farmland identity, and Potato identity plus one-item consumption does not prove the resulting crop block. Navigation may also arrive at the requested coordinates while hovering, so the operator must validate crop-height adjacency before `FARM`.
+
+OCIA-011's current-evidence wording is outdated where it says the prototype does not identify the selected planting item. Repository `plant_forward_down` already validates `getStackInInternalSlot(slot).name == "minecraft:potato"`; that Potato-specific check is host-tested but not yet accepted through OCIA in Minecraft. The issue should be corrected when implementation work is authorized while remaining open for broader internal/external inventory mapping, arbitrary material identity, tool identification, `equip()`, replacement, and manifest validation. This planning task does not implement those broader capabilities.
+
 ## Immediate Next Work
 
 Treat direct vertical travel, reactive one-block climbs, multi-elevation supervised coordinate travel, actual-breadcrumb inverse return, final pose reconciliation, and normal mission archival as the accepted navigation baseline. Preserve hovering as an acceptable coordinate-navigation behavior while keeping ground-relative positioning explicit for construction. Do not broaden this acceptance to lateral detours, entity retries, changed return routes, interrupted missions, energy reserve, charging verification, general pathfinding, or terrain surveying.
