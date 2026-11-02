@@ -45,7 +45,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Navigation
 - **Risk:** Construction planning cannot reliably map relative blueprint coordinates to physical robot actions.
-- **Current evidence:** Pure relative-pose logic, robot-side durable pose, and the controller Navigation Stage 2 mission journal pass host tests. The controller journal now preserves reconciled pose, exact before/expected intent poses, successful-action breadcrumbs, consumed unchanged-pose failures, and inverse-return progress, but it is not connected to live transport. In game, North-to-West and West-to-North turns matched physical heading; forward West changed `(0,0,0)` to `(-1,0,0)`, and backward returned to the origin. Trusted robot pose survived a normal daemon restart and agreed with physical observation. End-to-end controller/robot pose agreement during a durable navigation mission remains untested.
+- **Current evidence:** Pure relative-pose logic, robot-side durable pose, and the controller Navigation Stage 3 CLI pass host tests. The CLI now connects fresh robot status and existing transport to a controller journal that preserves exact before/expected intent poses, advances only correlated successful results, records actual breadcrumbs, reconciles consumed unchanged-pose failures, and returns through their exact inverse. Injected endpoint tests reach and return from `(-1,0,0)` West with matching controller/robot poses, stop on contradiction, and reject vertical Stage 3 execution. In game, the equivalent manual turn/forward/back fixture matched physical observation and trusted robot pose survived a normal daemon restart, but the durable `ocianav` round trip remains untested in Minecraft.
 - **Required mitigation:** Define a relative coordinate system and update controller and robot pose only after successful operations.
 - **Resolution criteria:** Movement and turn tests produce matching controller and robot poses, including partial-operation failures.
 
@@ -54,7 +54,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** In progress
 - **Area:** Persistence
 - **Risk:** A program, computer, game, or host restart can lose the authoritative step and cause repeated or skipped construction.
-- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Navigation Stage 2 adds a separate host-tested controller mission journal with intent-before-execution ordering, fresh-status-authorized exact pending-request retry, result classification, breadcrumbs, return progress, checksummed replay, pre-write semantic transition validation, and fail-closed open/write/flush/exceptional-close/rotation handling. Invalid caller transitions are host-tested to leave journal bytes and live state unchanged and replayable. It has no CLI, transport integration, deployment entry, or live OpenOS acceptance. In game, robot commissioning persisted a healthy checkpoint; legacy invalidation survived daemon stop; explicit recommissioning created a new epoch; and a normal restart recovered trusted pose, epoch, high water `2`, and two completed results from a healthy journal. Robot-side in-game compaction, partial writes, sudden power loss, interrupted physical records, and controller/robot crash-window integration remain untested.
+- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Navigation Stage 3 now connects the separate controller journal to the CLI and existing transport with intent-before-send ordering, post-confirmation status revalidation, exact pending-request replay, actual breadcrumbs, frozen return progress, terminal archive rotation, and fail-closed injected persistence handling. Definite local non-send is durably cleared without consuming sequence or changing pose; every possibly delivered outcome remains pending. Deployment fixtures preserve and prohibit manifest installation of `/var/lib/ocia/nav.state` and its archives. In game, only the robot journal has acceptance evidence: commissioning, invalidation, epoch rotation, and normal restart recovery. Controller/OpenOS append timing, archive rotation, crash windows between independent disks, interrupted physical records, compaction, partial writes, and sudden power loss remain untested live.
 - **Required mitigation:** Persist versioned controller deployment state and robot execution state using replace-safe writes.
 - **Resolution criteria:** Restart tests either resume from an unambiguous checkpoint or stop with an explicit recovery requirement.
 
@@ -67,14 +67,14 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Check `modem.isOpen` before opening and define whether the daemon owns and closes the port.
 - **Resolution criteria:** The daemon can be stopped and restarted repeatedly without a port-open assertion failure.
 
-### OCIA-007: Controller modem port ownership is unclear
+### OCIA-007: Controller modem consumers can conflict
 
 - **Status:** In progress
 - **Area:** Controller transport
-- **Risk:** `drive.lua` closes port 4242 on exit even when another program originally opened it.
-- **Current evidence:** Repository `drive.lua` and `ociactl.lua` track `openedHere` and close only when they opened the port. Sequential in-game use of `ociactl`, `drive`, and `ociactl` again succeeded; OCIA status remained available after legacy movement. Concurrent programs still consume a shared event queue and must not be run together; concurrent ownership remains untested.
-- **Required mitigation:** Record whether the program opened the port and close it only when it owns that action, or centralize modem ownership.
-- **Resolution criteria:** Exiting the manual driver does not disrupt another controller service using port 4242.
+- **Risk:** Concurrent controller programs can consume each other's port-4242 modem events or close a port opened by another program.
+- **Current evidence:** Repository `ocianav.lua`, `ociactl.lua`, `ociafarm.lua`, and `drive.lua` now acquire an advisory same-port owner in the OpenOS process registry before opening the modem or consuming events. Host tests cover conflict refusal, inherited process metadata, normal/cancellation/error cleanup, and independent `openedHere` close behavior across all four entrypoints. Official OpenOS 1.8.8 source confirms the registry, inherited `data` metatable, and process-removal behavior used. Sequential in-game `ociactl`, `drive`, and `ociactl` use succeeded before this change, but the new conflict/refusal path and interruption cleanup remain untested in OpenOS. Unmodified third-party consumers are not excluded.
+- **Required mitigation:** Retain separate `openedHere` tracking and cooperative process-registry ownership for every repository controller event consumer; reconcile epoch/high-water/pose independently because ownership is advisory.
+- **Resolution criteria:** A second cooperating OpenOS controller program refuses before opening or consuming events, normal/error/interruption cleanup permits later use, and exiting the manual driver does not disrupt a port it did not open.
 
 ### OCIA-008: Robot hardware calls can terminate the daemon
 

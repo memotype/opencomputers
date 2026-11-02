@@ -5,6 +5,7 @@ local event = require("event")
 local uuid = require("uuid")
 
 local configModule = require("ocia.config")
+local controllerOwner = require("ocia.controller_owner")
 local protocol = require("ocia.protocol")
 local transportModule = require("ocia.transport")
 
@@ -64,12 +65,25 @@ if modem.address ~= config.controller_address then
   os.exit(2)
 end
 
+local ownerLease, ownerReason = controllerOwner.acquire(config.port, "ociactl")
+if not ownerLease then io.stderr:write(ownerReason .. "\n"); os.exit(1) end
 local openedHere = false
-if not modem.isOpen(config.port) then
-  assert(modem.open(config.port), "Cannot open modem port " .. config.port)
-  openedHere = true
+local openOk, openReason = pcall(function()
+  if not modem.isOpen(config.port) then
+    assert(modem.open(config.port), "Cannot open modem port " .. config.port)
+    openedHere = true
+  end
+end)
+if not openOk then
+  ownerLease.release()
+  error(openReason, 0)
+end
+local function cleanup()
+  if openedHere then pcall(modem.close, config.port); openedHere = false end
+  ownerLease.release()
 end
 
+local function run()
 local client = transportModule.new({
   modem = modem,
   event = event,
@@ -77,21 +91,18 @@ local client = transportModule.new({
   config = config,
   request_id = uuid.next
 })
-
 if protocol.isPhysical(operation) and not requestId then
   local status = client:sendRequest("status")
   if status.certainty ~= "succeeded" or not status.payload
       or status.payload.pose_trusted ~= "true" or status.payload.mode ~= "ready"
       or not status.payload.epoch or status.payload.epoch == "" then
-    if openedHere then modem.close(config.port) end
     io.stderr:write("Cannot allocate a physical request: Wheatley is not commissioned and ready.\n")
-    os.exit(1)
+    return 1
   end
   local nextSequence = tonumber(status.payload.high_water)
   if not nextSequence then
-    if openedHere then modem.close(config.port) end
     io.stderr:write("Cannot allocate a physical request: invalid high-water status.\n")
-    os.exit(1)
+    return 1
   end
   requestId = assert(protocol.makePhysicalRequestId(status.payload.epoch, nextSequence + 1))
 end
@@ -101,8 +112,6 @@ local response = client:sendRequest(operation, {
   request_id = requestId,
   deployment_id = deploymentId
 })
-
-if openedHere then modem.close(config.port) end
 
 print("Request: " .. tostring(response.request and response.request.request_id or requestId or "not sent"))
 print("Certainty: " .. tostring(response.certainty))
@@ -157,7 +166,17 @@ if response.certainty == "unknown" then
   else
     io.stderr:write("Request outcome is unknown because no conclusive reply was received.\n")
   end
-  os.exit(1)
+  return 1
 elseif response.certainty == "failed" then
+  return 1
+end
+return 0
+end
+
+local ok, result = xpcall(run, debug.traceback)
+cleanup()
+if not ok then
+  io.stderr:write("ociactl error: " .. tostring(result) .. "\n")
   os.exit(1)
 end
+os.exit(result)

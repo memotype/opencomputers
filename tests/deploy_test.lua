@@ -139,7 +139,7 @@ local function rendered_config(controller, robot)
   }))
 end
 
-test("production manifest includes the supervised farm runtime files", function()
+test("production manifest includes farm and Stage 3 navigation runtime files", function()
   local controller = {}
   for _, entry in ipairs(deploy.manifest.controller) do
     if type(entry) == "string" then controller[entry] = true end
@@ -148,13 +148,21 @@ test("production manifest includes the supervised farm runtime files", function(
   for _, entry in ipairs(deploy.manifest.robot) do
     if type(entry) == "string" then robot[entry] = true end
   end
-  equal(#deploy.manifest.controller, 10)
+  equal(#deploy.manifest.controller, 14)
   equal(#deploy.manifest.robot, 11)
   truthy(controller["home/ociafarm.lua"])
+  truthy(controller["home/ocianav.lua"])
+  truthy(controller["lib/ocia/controller_owner.lua"])
   truthy(controller["lib/ocia/farm.lua"])
+  truthy(controller["lib/ocia/nav.lua"])
+  truthy(controller["lib/ocia/nav_state.lua"])
   truthy(robot["lib/ocia/farming.lua"])
   equal(lfs.attributes("machines/controller/home/ociafarm.lua", "mode"), "file")
+  equal(lfs.attributes("machines/controller/home/ocianav.lua", "mode"), "file")
+  equal(lfs.attributes("machines/controller/lib/ocia/controller_owner.lua", "mode"), "file")
   equal(lfs.attributes("machines/controller/lib/ocia/farm.lua", "mode"), "file")
+  equal(lfs.attributes("machines/controller/lib/ocia/nav.lua", "mode"), "file")
+  equal(lfs.attributes("machines/controller/lib/ocia/nav_state.lua", "mode"), "file")
   equal(lfs.attributes("machines/robot/lib/ocia/farming.lua", "mode"), "file")
 end)
 
@@ -410,6 +418,9 @@ test("generated configuration is authoritative while journal and unlisted files 
   local f = fixture()
   write(join(f.controller, "etc/ocia.cfg"), "live-controller-config\n")
   write(join(f.robot, "etc/ocia.cfg"), "live-robot-config\n")
+  write(join(f.controller, "var/lib/ocia/nav.state"), "nav-journal\n")
+  write(join(f.controller, "var/lib/ocia/nav.state.archive.switch"), "marker\n")
+  write(join(f.controller, "var/lib/ocia/nav.state.archive.mission"), "history\n")
   write(join(f.robot, "var/lib/ocia/robot.state"), "journal\n")
   write(join(f.robot, "var/lib/ocia/robot.state.new"), "new\n")
   write(join(f.robot, "var/lib/ocia/robot.state.old"), "old\n")
@@ -418,6 +429,9 @@ test("generated configuration is authoritative while journal and unlisted files 
   assert(run(f, {"--apply"}))
   equal(read(join(f.controller, "etc/ocia.cfg")), rendered_config())
   equal(read(join(f.robot, "etc/ocia.cfg")), rendered_config())
+  equal(read(join(f.controller, "var/lib/ocia/nav.state")), "nav-journal\n")
+  equal(read(join(f.controller, "var/lib/ocia/nav.state.archive.switch")), "marker\n")
+  equal(read(join(f.controller, "var/lib/ocia/nav.state.archive.mission")), "history\n")
   equal(read(join(f.robot, "var/lib/ocia/robot.state")), "journal\n")
   equal(read(join(f.robot, "var/lib/ocia/robot.state.new")), "new\n")
   equal(read(join(f.robot, "var/lib/ocia/robot.state.old")), "old\n")
@@ -432,6 +446,9 @@ test("unsafe and protected manifest destinations are rejected", function()
   equal(result, nil); contains(err, "unsafe manifest path")
   result, err = run(f, {"--target", "robot"},
     {manifest = {controller = {}, robot = {"var/lib/ocia/robot.state"}}})
+  equal(result, nil); contains(err, "protected runtime path")
+  result, err = run(f, {"--target", "controller"},
+    {manifest = {controller = {"var/lib/ocia/nav.state"}, robot = {}}})
   equal(result, nil); contains(err, "protected runtime path")
   result, err = run(f, {"--target", "controller"},
     {manifest = {controller = {"etc/ocia.cfg"}, robot = {}}})

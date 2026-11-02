@@ -4,6 +4,7 @@ local component = require("component")
 local computer = require("computer")
 local event = require("event")
 local configModule = require("ocia.config")
+local controllerOwner = require("ocia.controller_owner")
 
 local config = assert(configModule.load("/etc/ocia.cfg", "controller"))
 local PORT = config.port
@@ -11,13 +12,26 @@ local modem = assert(component.modem, "Controller needs a wireless network card"
 assert(modem.isWireless(), "Controller modem is not wireless")
 assert(modem.address == config.controller_address,
   "Configured controller address does not match this modem")
+local ownerLease = assert(controllerOwner.acquire(PORT, "drive"))
 local openedHere = false
-if not modem.isOpen(PORT) then
+local openOk, openReason = pcall(function()
+  if not modem.isOpen(PORT) then
     assert(modem.open(PORT), "Cannot open modem port " .. PORT)
     openedHere = true
+  end
+end)
+if not openOk then
+  ownerLease.release()
+  error(openReason, 0)
+end
+
+local function cleanup()
+  if openedHere then pcall(modem.close, PORT); openedHere = false end
+  ownerLease.release()
 end
 
 local valid = { f=true, b=true, l=true, r=true, u=true, d=true, status=true }
+local function run()
 print("Remote robot drive: f/b/l/r/u/d, status, q")
 print("Example: f 3 (three blocks forward), then l, then f 3")
 
@@ -25,7 +39,6 @@ while true do
   io.write("drive> ")
   local line = io.read()
   if not line or line == "q" or line == "quit" then
-    if openedHere then modem.close(PORT) end
     break
   end
 
@@ -57,3 +70,8 @@ while true do
   end
 end
 print("Driver stopped")
+end
+
+local ok, reason = xpcall(run, debug.traceback)
+cleanup()
+if not ok then error(reason, 0) end

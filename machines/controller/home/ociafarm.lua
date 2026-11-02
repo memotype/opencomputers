@@ -5,6 +5,7 @@ local event = require("event")
 local uuid = require("uuid")
 
 local configModule = require("ocia.config")
+local controllerOwner = require("ocia.controller_owner")
 local farm = require("ocia.farm")
 local transportModule = require("ocia.transport")
 
@@ -45,22 +46,34 @@ assert(modem.isWireless(), "Controller modem is not wireless")
 assert(modem.address == config.controller_address,
   "Configured controller address does not match this modem")
 
+local ownerLease, ownerReason = controllerOwner.acquire(config.port, "ociafarm")
+if not ownerLease then io.stderr:write(ownerReason .. "\n"); os.exit(1) end
 local openedHere = false
-if not modem.isOpen(config.port) then
-  assert(modem.open(config.port), "Cannot open modem port " .. config.port)
-  openedHere = true
+local openOk, openReason = pcall(function()
+  if not modem.isOpen(config.port) then
+    assert(modem.open(config.port), "Cannot open modem port " .. config.port)
+    openedHere = true
+  end
+end)
+if not openOk then
+  ownerLease.release()
+  error(openReason, 0)
 end
-local client = transportModule.new({
-  modem = modem, event = event, computer = computer, config = config,
-  request_id = uuid.next
-})
+local client
 
-local function closePort() if openedHere then modem.close(config.port) end end
+local function cleanup()
+  if openedHere then pcall(modem.close, config.port); openedHere = false end
+  ownerLease.release()
+end
 local function poseText(value)
   return string.format("(%d,%d,%d) %s", value.x, value.y, value.z, value.heading)
 end
 
 local function run()
+  client = transportModule.new({
+    modem = modem, event = event, computer = computer, config = config,
+    request_id = uuid.next
+  })
   local statusResponse = client:sendRequest("status")
   if statusResponse.certainty ~= "succeeded" then
     return nil, "Cannot read ready status: " .. tostring(statusResponse.code)
@@ -134,6 +147,6 @@ local function run()
 end
 
 local ok, result, reason = pcall(run)
-closePort()
+cleanup()
 if not ok then io.stderr:write("Farm prototype error: " .. tostring(result) .. "\n"); os.exit(1) end
 if not result then io.stderr:write("Farm prototype stopped: " .. tostring(reason) .. "\n"); os.exit(1) end

@@ -12,10 +12,10 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Wireless port: `4242`
 - Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Core supervised transport, movement, duplicate/conflict handling, commissioning, and normal restart tests passed on 2026-10-30; compaction and fault-injection acceptance remain pending, so Milestone 1 is partially accepted rather than complete.
 - The remaining Milestone 1 compaction and fault-injection acceptance is deliberately deferred while the project prioritizes a supervised, playable construction vertical slice: Wheatley's first 3x3 Potato patch. Milestone 1 is not complete.
-- Navigation MVP Stages 1 and 2 are implemented, hardened after independent review, and host-validated. `lib/ocia/nav.lua` provides pure minimum-cost nominal routes, while the controller-only `lib/ocia/nav_state.lua` provides a checksummed append-only mission journal, intent-before-execution state, conservative result classification and reconciliation, explicit identical-request retry authorization, actual-action breadcrumbs, inverse-return progress, and terminal archive rotation. Neither module is in the deployment manifest or installed in Minecraft. Stage 3 execution is not implemented.
-- `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. The corrected prototype manifest is now 10 controller files and 11 robot files, including one generated `/etc/ocia.cfg` per role; journal state remains excluded.
+- Navigation MVP Stages 1 through 3 are implemented and host-validated. `lib/ocia/nav.lua` provides pure minimum-cost nominal routes; `lib/ocia/nav_state.lua` provides the durable controller mission lifecycle; and `home/ocianav.lua` now integrates supervised flat `plan`, `go`, `status`, `return`, and `resume` commands with the existing transport and robot executor. Stage 3 has not been independently code-reviewed, deployed, or accepted in Minecraft.
+- `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. The proposed manifest is now 14 controller files and 11 robot files, including one generated `/etc/ocia.cfg` per role; controller navigation journals and archives remain excluded.
 - `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save, two HDD UUIDs, and two confirmed modem UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
-- The full 18-entry manifest is installed in the live world. Both generated `/etc/ocia.cfg` files loaded successfully in OpenOS, and a post-apply dry run reported all 18 entries `UNCHANGED`.
+- The pre-Stage-3 manifest remains installed in the live world. Both generated `/etc/ocia.cfg` files loaded successfully in OpenOS. Stage 3's controller additions and ownership changes are present only in the repository; the current dry run reports their expected controller creates/updates and every robot file unchanged.
 - The 21-entry one-pass Potato prototype demonstrated adjacent journaled till-and-plant behavior in the single-cell and two-cell stages. Two full 3x3 attempts then stopped safely on Dirt outside the plot, exposing the old perimeter route's excessive clearance requirement. Its parameterized reverse-serpentine replacement was deployed and completed the supervised 3x3 patch successfully in game. [POTATO_PATCH.md](POTATO_PATCH.md) is the operator runbook.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
@@ -954,6 +954,306 @@ Hardening validation passed `28 tests / 703 assertions` in the focused Stage 2 s
 
 Stage 2 is ready for another Stage 3 authorization review at the host-test level only. No OpenOS deployment or Minecraft acceptance occurred. The controller still lacks a CLI, transport execution loop, real process-exclusivity enforcement, and live measurements of journal memory/timing. Successful OpenOS calls do not establish `fsync`; sudden JVM/host/power loss and the persistence ordering between independent controller and robot disks remain unproven and may require manual reconciliation.
 
+### Stage 3 Implementation Plan: flat supervised navigation and exact inverse return
+
+**Planning status: complete on 2026-11-01. Readiness verdict: CONDITIONAL GO after independent review and a separate implementation authorization.** The current checkout is commit `6cfaa76619f8652c96feabcfc3d0ab218e9d8845` (`Stage 2 Hardening Round`), matching `origin/master` with a clean worktree before this planning-only documentation update. Stage 1 and Stage 2 provide the required planner, intent journal, result classifier, exact-request retry contract, actual-action breadcrumbs, inverse-return state, and archive rotation. No protocol or robot-side change is required for Stage 3.
+
+The condition is one narrow controller-journal lifecycle correction plus cooperative controller-process ownership:
+
+1. `nav_state.classify()` correctly identifies `local_rejection` as `local_nonsend`, but `applyRecord()` currently treats every classification other than success, completed failure, or definite nonexecution as an ambiguous unresolved intent. This leaves a request proven not to have reached `modem.send` permanently pending, prohibits `terminate()`, and prevents safe archive rotation. Stage 3 must add a durable, host-tested definite-local-nonsend transition that restores the pending intent's original outbound/returning phase, clears the pending intent, and sets `reconciliation_required=true` without advancing robot high water, changing pose, adding a breadcrumb, or counting a physical action. The CLI stops after recording it; a later invocation may move only after fresh status reconciliation. It must not generalize this behavior to `send_failed`, timeout, rejection, recovery-required, malformed, or contradictory results.
+2. Port `4242` is globally open on the controller and `event.pull` consumers compete for the same event stream. Current `drive.lua`, `ociactl.lua`, and `ociafarm.lua` have restart-safe port open/close ownership but no process-exclusivity convention. Stage 3 should add one small controller-only cooperative owner module using the installed OpenOS 1.8.8 `process.list` / `process.info().data` process registry, then make all four controller programs acquire it while consuming modem events. Process exit removes the process record, avoiding a persistent stale lock after interruption. This is advisory: it prevents concurrent cooperating repository programs, not arbitrary third-party code. `drive.lua` remains the manual recovery path; interrupt the active OCIA controller process first, then start `drive`.
+
+Neither condition requires redesigning Stage 1 or Stage 2. The local-nonsend correction is the smallest missing state transition, and cooperative ownership is isolated from the protocol and mission journal. Implementation must stop if either change requires robot firmware, a new protocol operation, or a broader navigation architecture.
+
+#### Inspected source contracts and implementation boundaries
+
+The implementation must use the source contracts below rather than historical shorthand:
+
+- `nav.plan(startPose, destination[, options])` returns a deterministic record containing `operations`, `cost`, `movement_count`, `turn_count`, `expected_end`, `inverse_cost`, `distance`, `max_distance`, `terrain_model="unobstructed"`, and `traversability="unknown"`. It accepts nonzero Y and has only the pure dependency `ocia.pose`. Stage 3 execution, not the planner, enforces `destination.y == 0`.
+- `nav.inverse(operations)` reverses and inverts turns, forward/backward movement, and vertical movement. Stage 3 return does not invert the original nominal plan directly; `nav_state.prepareIntent()` enforces the inverse of the breadcrumb at `return_state.cursor`.
+- `nav_state.createMission(robotStatus, specification)` requires `mode="ready"`, `journal_health="healthy"`, a valid nonempty epoch, trusted exact home `(0,0,0)` North, a valid destination, and an action limit from 1 through 160. It records the robot's existing physical high water but does not create the file; `store.create(snapshot)` must durably write the mission header.
+- `prepareIntent(store, snapshot, specification)` validates the operation and complete protocol request, allocates exactly `high_water + 1`, derives the expected pose with `pose.apply`, and appends the intent before returning it. In `returning`, it accepts only the exact inverse of the frozen breadcrumb and requires the expected pose to equal that breadcrumb's `before` pose.
+- A newly appended intent has runtime-only `transmit_authorized=true`; `canTransmit()` is the only permission for its first send. `journalStore.load()` deliberately clears both transmit and retry permission. A replayed intent, including one likely persisted before any send, must use fresh status plus `authorizeRetry()` and `retryRequest()` rather than regaining first-send authority.
+- `requestForPending()` reconstructs the exact request. The existing `transport:sendRequest(operation, options)` can transmit it by passing the recorded `request_id`, `deployment_id`, and decoded `arguments`. Before doing so, the CLI must confirm that the pending recipient equals the current configured robot address; transport always sends to `config.robot_address` and offers no recipient override.
+- `recordResult()` calls the closed `classify()` allowlist and appends a result before publishing its effect. Only correlated `succeeded / operation_succeeded` changes pose or appends a breadcrumb/return step. `failed / operation_failed` and authoritative `interrupted_before_execution / not_started` consume the sequence, count one physical action, preserve pose, clear pending, and set `reconciliation_required=true`.
+- `assessStatus()` validates robot readiness, journal health, epoch, high water, and pose. With an eligible pending intent it returns `retry_identical`; status is authorization evidence only and never proof that the physical operation succeeded. Without a pending intent it returns `continue` only for exact epoch/high-water/pose agreement.
+- `recordReconciliation()` persists an exact no-pending status match and clears the post-failure reconciliation gate. When inverse return has exhausted its cursor, the same transition is the only path from `home_pending_reconcile` to `home_pose_reached`.
+- `authorizeRetry()` durably records fresh status permission for only a pending intent with no observation, timeout, or ambiguous send failure. `canRetryPending()` and `retryRequest()` expose the exact request only in the current process after that authorization. Replay clears permission again.
+- `markDestination()` requires outbound phase, no pending request, and a pose satisfying destination coordinates plus optional heading. `beginReturn()` freezes the successful outbound breadcrumb count and may start from outbound, at-destination, or recovery-required only when no intent is pending. `terminate()` requires no pending intent. File-store `archive()` requires a healthy terminal mission and uses `.archive.switch` plus a mission-ID archive filename; any marker, rename, or cleanup uncertainty fails closed.
+- `transport:sendRequest()` already validates local request construction, modem delivery, sender/local recipient/port, protocol parsing, and request/reply correlation. Its `certainty` field is intentionally too coarse for navigation; Stage 3 must always pass the complete response to `nav_state.recordResult()`.
+- Robot `executor.handle()` already supplies durable `prepared`, `executing`, and `completed` ordering; cached duplicate results; contiguous epoch sequences; structured unchanged-pose failures; and recovery-required ambiguity. `robotd.lua` already dispatches all six Stage 3 movement/turn operations. No sensor request, protocol extension, robot state change, or new executor action is needed.
+- The Stage 2 journal is bounded by the 160-physical-action mission limit and 1024 records. Existing tests measured 160 successful physical actions at no more than 321 records and less than 512 KiB. Stage 3 adds no controller-journal compaction.
+
+One source-level difference from the older architecture prose is important: Stage 2 persists the destination and actual breadcrumbs, not the original nominal operation list or an outbound plan index. After a clean no-pending restart, Stage 3 should deterministically call `nav.plan(snapshot.pose, snapshot.destination, ...)` again and continue from the reconciled actual pose. A changed nominal suffix is acceptable because every successful physical action becomes a breadcrumb and return inverts the actual history. A pending operation is never replanned around; it must first resolve under the exact-request contract.
+
+#### Exact implementation scope
+
+Create or modify only the following files during the separately authorized implementation:
+
+| File | Planned Stage 3 responsibility |
+|---|---|
+| Controller `home/ocianav.lua` | Thin but testable command entrypoint; parse commands, keep `plan` hardware-free, construct live dependencies only for other commands, render status/plan, request confirmations, drive the durable one-operation execution/recovery loops, and guarantee port-owner release. |
+| Controller `lib/ocia/controller_owner.lua` (new) | Cooperative per-port process ownership using OpenOS `process.list` and current process data; injected registry seam for host tests; acquire/refuse/release without a disk lock or runtime-state deployment target. |
+| Controller `lib/ocia/nav_state.lua` | Minimal definite-`local_nonsend` durable resolution described above; no other classification or replay semantics change. |
+| Controller `home/drive.lua` | Acquire/release cooperative controller-port ownership while preserving the legacy command/reply format and manual recovery behavior. |
+| Controller `home/ociactl.lua` | Acquire/release cooperative ownership around modem event consumption; otherwise retain the diagnostic probe behavior. |
+| Controller `home/ociafarm.lua` | Acquire/release cooperative ownership around its current supervised execution; no farm planner/executor behavior change. |
+| `deploy.lua` | Add allowlisted controller entries for `home/ocianav.lua`, `lib/ocia/nav.lua`, `lib/ocia/nav_state.lua`, and `lib/ocia/controller_owner.lua`. Never add `/var/lib/ocia/nav.state`, locks, archives, or other runtime state. |
+| `tests/nav_state_cases.lua` | Update the local-nonsend expectation and add exact replay/invariant tests for its durable resolution. |
+| `tests/nav_cli_cases.lua` and `tests/nav_cli_test.lua` (new) | Focused parser, preview, orchestration, recovery, ownership, mocked transport, restart, and zero-sensor coverage. |
+| `tests/run.lua` | Register the Stage 3 cases in the integrated host suite. |
+| `tests/deploy_test.lua` | Assert the expanded controller manifest, source existence, selective installation, and continued protection/preservation of navigation runtime state. |
+
+`nav.lua`, `pose.lua`, `protocol.lua`, `transport.lua`, all robot files, the farm library, configuration templates, and runtime-state formats otherwise remain unchanged. The journal path is the fixed controller-local `/var/lib/ocia/nav.state`; do not overload the existing robot `state_path` configuration key or expand generated configuration merely to hold this one Stage 3 constant.
+
+The `ocianav.lua` implementation should expose a callable `main(arguments, dependencies)` or equivalent injected entry seam while remaining directly executable under OpenOS. Hardware modules (`component`, `event`, `computer`, configuration, modem, filesystem journal, UUID generation, and controller owner) must be required or constructed only after parsing chooses a live command. The `plan` path may load only `ocia.nav` and `ocia.pose`; its isolation test should fail if it touches component, modem, event, filesystem, journal, configuration, UUID, process ownership, or live status.
+
+#### CLI contract
+
+Supported syntax is deliberately closed:
+
+```sh
+ocianav plan --x X --y Y --z Z [--heading north|east|south|west]
+ocianav go --x X --y 0 --z Z [--heading north|east|south|west]
+ocianav status
+ocianav return
+ocianav resume
+```
+
+- Coordinates are required signed base-10 safe integers. Reject duplicates, missing values, fractional/scientific forms, unsupported flags, extra positional arguments, invalid headings, and destination distance beyond `nav.DEFAULT_MAX_DISTANCE`. Use exit `2` for usage/validation failures, `1` for operational/recovery stops, and `0` only for a successfully completed command or an intentional confirmation cancellation before state changes.
+- `plan` prints the explicit assumed start `(0,0,0) North`, destination, ordered operations, movement/turn/total/inverse costs, expected end pose, max-distance and 160-action policy limits, `terrain_model=unobstructed`, and `traversability=unknown`. It must state that it contacted no robot and wrote no state. Nonzero Y is permitted in preview.
+- `go` rejects nonzero Y before hardware access. It acquires controller-port ownership, loads `/var/lib/ocia/nav.state`, and refuses corrupt, uncertain, active, or unresolved state. A healthy terminal file is not silently overwritten; `resume` or the completion path must archive it first. It requests fresh correlated status and requires Stage 2's healthy ready trusted home contract. It computes the home-based plan and requires `2 * plan.cost <= action_limit` before acceptance. It displays every operation, expected pose, outward and inverse budgets, lack of sensing/obstacle handling, no energy-reserve guarantee, and the fact that arrival does not prove charging. Only literal `NAVIGATE` proceeds. Cancellation occurs before mission creation.
+- After confirmation, `go` creates a UUID mission with owner `ocianav`, destination, action/max-distance limits, and diagnostic planned outbound/return costs, then calls `store.create()` before preparing the first physical intent. A zero-operation home destination is still a durable mission: mark destination without sending a physical request.
+- `status` acquires the cooperative port owner, sends exactly one nonphysical `status` request, and separately attempts a read-only controller journal load. It prints live certainty/code, ready/recovery state, epoch/high water, pose, energy, and robot journal health; controller journal source/health, mission ID, phase, pose, high water, physical-action count/limit, pending request/classification, reconciliation gate, breadcrumb count, return cursor, home flag, charging flag, terminal outcome, and archive artifact/corruption diagnostics. It does not call `store.create`, `append`, `archive`, `prepareIntent`, `authorizeRetry`, or `recordReconciliation`. Absence is `no active controller mission`, not an invitation to create one.
+- `return` requires a healthy existing nonterminal mission and fresh exact status reconciliation. An unresolved pending intent must be handled by `resume`, never bypassed. After displaying the frozen actual-breadcrumb inverse, remaining action budget, current pose, and limitations, only literal `RETURN` calls `beginReturn()`. It may return from a partially completed outbound mission after any required consumed-failure reconciliation. It sends exact inverse steps until home-pending-reconcile or the first non-success. It never plans a nominal route home and never adds return steps to the outbound breadcrumbs.
+- `resume` never creates a mission or epoch. It loads the journal, obtains fresh status, and calls `assessStatus()`. It prints the exact proposed recovery/continuation before literal `RESUME` confirmation. With a pending eligible intent it must call `authorizeRetry()`, verify `canRetryPending()`, obtain only `retryRequest()`, and resend that identity. With no pending intent it calls `recordReconciliation()` before further movement, then either replans the outbound suffix from the reconciled pose or continues the frozen return cursor. `at_destination` requires no motion; `home_pending_reconcile` performs only status reconciliation; `home_pose_reached` performs only terminal/archive completion. Robot rejection, recovery-required, retired result, contradictory status, unhealthy state, or a non-retryable pending classification is a manual-recovery stop.
+- Every movement command prints mission ID, request ID, operation, before/expected pose, response classification, resulting durable phase/high water, physical action count, energy evidence if returned, and whether execution stopped. Output must distinguish controller persistence failure from robot/transport failure.
+
+#### Durable execution and lifecycle
+
+Use one shared execution helper inside `ocianav.lua`, not a new orchestration framework:
+
+1. Before starting or continuing a route, validate flat execution (`snapshot.pose.y == 0`, destination Y zero, and every recomputed operation horizontal/turn only), journal health, no unhandled reconciliation gate, and sufficient action budget. For outbound continuation, conservatively require capacity for all remaining nominal outbound successes plus return of all existing and prospective breadcrumbs: `physical_actions + remaining_outbound + #breadcrumbs + remaining_outbound <= action_limit`. For return, require `physical_actions + return_state.cursor <= action_limit`.
+2. For each operation call `prepareIntent()` with configured robot recipient and empty arguments. If persistence fails, send nothing and stop. Confirm `canTransmit()` and reconstruct with `requestForPending()`; do not retain a separately built request as authority.
+3. Transmit through existing `transport:sendRequest()` using exactly the pending operation, ID, deployment ID, and decoded arguments. Pass the complete returned table to `recordResult()` exactly once. A result-persistence failure stops immediately; do not use the uncertain in-memory classification to advance.
+4. Continue only when the durably recorded classification is `success`. For `completed_failure` or `definite_nonexecution`, request fresh status and attempt `recordReconciliation()` for the consumed unchanged-pose sequence, then stop the invocation even if reconciliation succeeds. This keeps obstruction/nonexecution supervised and prevents an automatic retry loop.
+5. For the new definite `local_nonsend`, durably restore the intent's original phase, clear the unsent pending intent without consuming high water, set the reconciliation gate, and stop with a configuration/programming diagnostic. For `send_ambiguous`, timeout, rejection, recovery-required, malformed, or contradictory results, retain the exact pending identity and stop. Do not automatically call `authorizeRetry()` in the same invocation.
+6. After the outbound suffix is exhausted, verify the durable pose satisfies destination and call `markDestination()`. Do not infer arrival solely from the local loop counter.
+7. During return, use the operation required by the breadcrumb at `return_state.cursor`; `prepareIntent()` independently verifies the exact inverse and predecessor pose. After cursor zero, request fresh status and call `recordReconciliation()` to reach `home_pose_reached`. Do not set or print `charging_verified=true`.
+
+Normal completion lifecycle is:
+
+```text
+outbound -> at_destination -> returning -> home_pending_reconcile
+    -> home_pose_reached -> terminal -> archived history
+```
+
+If return began before reaching the requested destination, reaching home is a safe abort rather than successful navigation. Determine this from the frozen outbound breadcrumb endpoint (or home for an empty breadcrumb) against the mission destination; record terminal outcome `aborted` with a specific reason. Only a mission whose outbound history reached its destination may terminate as `navigation_complete`. Both outcomes still report `charging_verified=false`. After the terminal record persists, immediately call file-store `archive()`. A crash after terminal but before archive is completed by a later `resume` after fresh consistent status. Archive uncertainty blocks `go`; no active or uncertain journal is overwritten. Archives remain ordinary OpenOS state/history and are not deployment targets.
+
+An operator may leave an active at-destination, partial-outbound, returning, or recovery-required mission for inspection. There is no Stage 3 `abort` command that discards it. Safe ways forward are `return`, `resume`, or manual physical reconciliation under the existing recovery procedure. Never delete, truncate, or rename an active journal by hand as part of ordinary CLI flow.
+
+#### Recovery matrix for the Stage 3 CLI
+
+| Evidence after a persisted intent | Durable state and sequence | Required Stage 3 action |
+|---|---|---|
+| Newly persisted, current-process intent | Pending; controller high water unchanged; first-send permission runtime-only | Send once only if `canTransmit()`; otherwise stop. |
+| Correlated `operation_succeeded` | Result consumes sequence, advances pose, adds exactly one outbound breadcrumb or return step | Continue only after `recordResult()` persists. |
+| Correlated `operation_failed` | Consumes sequence, unchanged pose, no breadcrumb, reconciliation required | Fetch fresh status, persist exact reconciliation if possible, then stop. Later supervised `return` or `resume` may proceed after the obstacle is cleared; no detour. |
+| `interrupted_before_execution` plus `physical_outcome=not_started` | Consumes sequence, unchanged pose, no breadcrumb, reconciliation required | Reconcile fresh status, stop, and require `resume` confirmation before issuing a new contiguous ID. |
+| Proven `local_rejection` before send | With the planned correction: original phase restored, pending clears, high water/pose/action count unchanged, reconciliation required | Diagnose/fix local request/configuration defect, reconcile fresh status, and stop. Never classify it as terrain or ambiguous delivery. |
+| `send_failed` | Pending exact request retained; delivery/outcome ambiguous | Stop. On later `resume`, fresh status may authorize only the identical request. |
+| Timeout/lost acknowledgment | Pending exact request retained; outcome ambiguous | Stop. Later `resume` uses fresh status, `authorizeRetry()`, and the identical request; only the cached correlated result advances state. |
+| Robot `rejected` | Pending retained; rejection does not prove allocation state | Manual recovery/diagnosis. No new ID and no archive while pending. |
+| Robot `recovery_required` | Pending retained; physical state may be unknown | Manual physical reconciliation under existing procedure; no automatic movement. |
+| Malformed, stale, mismatched, or pose-contradictory response | Pending retained; response is not authority | Stop as recovery-required; no inference from pose/high water. |
+| Restart with unresolved intent and no result observation | Replay clears first-send authority | Fresh status plus `authorizeRetry()` and explicit `RESUME`; resend only `retryRequest()`. |
+| Restart after timeout/send ambiguity | Same exact pending observation replays; retry permission clears | Fresh authorization and explicit `RESUME` for each retry attempt. |
+| Restart after robot success but before controller result persistence | Journal may replay pending, completed, or corrupt depending which complete record reached disk | If pending, exact retry obtains cached robot result; if completed, reconcile; if corrupt/uncertain, stop for manual recovery. |
+| Controller intent persistence failure | No permitted send; journal health uncertain | Stop immediately and reload in a new invocation; never repair or continue the live snapshot. |
+| Controller result/reconciliation/terminal/archive persistence uncertainty | No effect may be assumed from the live object | Stop; reload and inspect complete records/artifacts. Partial/corrupt state is manual recovery. |
+| Robot result retired before controller recovery | Exact retry returns rejection; status cannot reconstruct outcome | Manual recovery; never infer success from current coordinates. |
+| External `drive`, `ociactl`, `ociafarm`, epoch rotation, or another physical high-water change | Status disagrees with controller mission | Stop as interference. Legacy movement remains pose-invalidating and requires recommissioning. |
+
+The two journals remain independent. This plan claims safe ordering under validated append/replay and retained-result behavior, not a distributed transaction or `fsync`-grade survival of JVM/host/power loss.
+
+#### Cooperative controller-port ownership
+
+`controller_owner.acquire(port, label)` should inspect the installed OpenOS process registry and place a unique owner record in the current process's `process.info().data`. Registry inspection must use the record's own data (`rawget`) rather than inherited parent-process data, because OpenOS gives child process data an `__index` link to its parent. It refuses when another live cooperating process owns the same port, returns an idempotent release function/token, and never opens or closes the modem itself. All modem-consuming controller programs acquire before `modem.open`/`event.pull` and release on normal return and protected error cleanup. Existing `openedHere` logic remains responsible only for the modem port.
+
+Host tests inject a fake process registry to cover first acquire, conflicting acquire, different ports, same-process behavior, release, and cleanup after an error. The first OpenOS acceptance session must also start one harmless status client while another cooperating client holds the owner and confirm refusal without consuming an event. This mechanism cannot exclude unmodified third-party programs and is therefore diagnostic/advisory, not a safety proof. Do not use a persistent lock file: OpenOS `filesystem.open` supports only `r/rb/w/wb/a/ab`, not exclusive-create mode, and a crash-stale disk lock would obstruct `resume`.
+
+#### Implementation sequence and stopping points
+
+1. **Close the local-nonsend lifecycle gap.** Add focused failing tests first, implement only the definite-local-nonsend transition, and rerun Stage 2 tests. Stop if any ambiguous class becomes clearable or any high-water/pose/breadcrumb value changes.
+2. **Add cooperative ownership.** Implement the injected process-registry helper and focused tests, then integrate it into `ociactl`, `ociafarm`, and `drive` without changing their wire behavior. Stop if the manual driver cannot be restored simply by ending the active owner process.
+3. **Build pure parsing and preview.** Create the testable `ocianav` entry seam and implement `plan` with no live dependencies. Add exhaustive CLI validation and dependency-boundary tests before any modem orchestration.
+4. **Implement read-only status and journal inspection.** Mock status transport and every journal source/health result. Confirm no append/archive or physical ID allocation occurs.
+5. **Implement mission creation and one-operation outbound execution.** Add home/status gating, flat-execution and round-trip budget checks, `NAVIGATE`, mission creation, intent-before-send assertions, correlated success, and destination marking. Stop before implementing resume or return and review the exact append/send order.
+6. **Implement recovery/resume.** Cover unsent replay, lost acknowledgment, ambiguous send, cached success, consumed failures, result-persistence uncertainty, retired results, and external interference. Require `RESUME` before any recovered or continued physical action.
+7. **Implement frozen inverse return and completion.** Add `RETURN`, exact cursor execution, home reconciliation, outcome selection, terminal record, and safe archive continuation after restart.
+8. **Expand deployment allowlist and regressions.** Add only the four Stage 3 controller runtime files. Prove `/var/lib/ocia/nav.state`, archive markers/history, robot state, unrelated files, and manual configuration remain untouched by dry-run/apply fixtures.
+9. **Run full host gates and independent review.** Require focused Stage 3, integrated, deployment, Lua 5.3 parse, `git diff --check`, and a manifest dry run. Do not deploy or enter Minecraft until the implementation diff receives separate review.
+
+Each step is independently reviewable. No later step may conceal a failed earlier safety invariant by adding recovery heuristics.
+
+#### Host-test matrix
+
+Reuse `tests/nav_cases.lua` for route determinism and inverse math, `tests/nav_state_cases.lua` for journal/replay/fault semantics, its existing virtual-filesystem patterns for injected OpenOS failures, and the existing mocked transport shapes from `tests/run.lua`. New CLI cases should use injected input/output, configuration, owner, store factory, UUID, status sender, and physical sender; they must not depend on real components or the live world.
+
+Required new or extended coverage:
+
+1. Parse all five commands; signed coordinates and all headings; reject missing/duplicate/unknown/noninteger/unsafe values and arguments on status/return/resume.
+2. Load `plan` in an environment without component, event, computer, filesystem, config, UUID, process, journal, or modem; assert exact deterministic output and zero writes/sends for flat and nonzero-Y previews.
+3. `go` rejects nonzero Y before live dependencies; rejects non-home/untrusted/unready/unhealthy status, absent epoch, invalid high water, active/unresolved/corrupt/uncertain controller journals, and destination beyond policy.
+4. Enforce `outbound + inverse <= 160` at creation and the conservative remaining-route/return formula after consumed failures. Test the exact boundary and one action over it.
+5. Confirmation mismatch sends no physical request and creates no journal. Literal `NAVIGATE`, `RETURN`, and `RESUME` are case-sensitive.
+6. Assert chronological ordering `mission create -> intent append -> modem send -> result append`; inject a failure at each persistence boundary and assert no unauthorized later call.
+7. Correlated success advances pose/high water and appends one actual breadcrumb; duplicate result delivery cannot append twice. Wrong request, deployment, operation, fingerprint, payload, or pose fails closed.
+8. Outbound restart with no pending recomputes a deterministic suffix from durable actual pose. Restart with pending and no observation cannot use `canTransmit`; it requires fresh `authorizeRetry` and identical `retryRequest`.
+9. Definite failure and definite nonexecution consume high water without pose/breadcrumb change, require fresh reconciliation, and stop the invocation even after successful reconciliation.
+10. Definite local non-send restores the original phase, clears only the unsent intent, leaves high water/pose/action count unchanged, and gates movement on reconciliation; send failure/timeout/rejection/recovery-required/malformed/contradictory responses remain pending and non-clearable.
+11. Lost reply fixture executes a simulated robot endpoint once, restarts the controller, authorizes exact retry, receives cached success, records one breadcrumb, and never makes a second physical call.
+12. Restart after simulated physical success but before result persistence covers intent-only replay, complete-result replay, flush/close uncertainty, partial corruption, and retired-result rejection.
+13. Exact return inverts actual breadcrumbs containing turns, forward movement, backward movement, and a partial outbound route; no planned-but-unsent or failed operation appears. Restart during return preserves cursor and sends only the next inverse.
+14. Home coordinates without fresh reconciliation remain `home_pending_reconcile`; exact status produces `home_pose_reached`; charging remains false. A partial mission returning home terminates `aborted`, while a reached-destination mission terminates `navigation_complete`.
+15. Terminal archive succeeds only for healthy no-pending state; restart between terminal and archive resumes rotation; marker/rename/remove faults remain explicit and block a new mission.
+16. `status` reports absent, healthy, pending, recovery-required, corrupt, uncertain-write/rotation, terminal, archived, and live-status-unavailable cases without mutation.
+17. Controller owner covers conflict, release, error cleanup, and all four cooperating programs; modem close remains limited to the process that opened it.
+18. Record every transport operation and assert Stage 3 emits only `status`, `turn_left`, `turn_right`, `move_forward`, and `move_backward`. Assert zero `nav_probe`, `detect`, analyze, scan, swing, place, use, vertical physical execution, or robot-side changes.
+19. Deployment tests expect the expanded controller manifest, install all Stage 3 source files selectively, reject any `var/lib/ocia/nav.state` manifest entry, and preserve preexisting navigation state, archives, markers, robot state, and unrelated HDD files byte-for-byte.
+20. Run existing Stage 1/2/farm/installer regressions unchanged, both focused Stage 3 tests and the integrated suite, Lua 5.3 syntax checks for every Lua source/test, and `git diff --check`.
+
+Host success authorizes only an implementation review. It is not OpenOS or Minecraft acceptance.
+
+#### Supervised Minecraft acceptance plan
+
+Deploy only after a separately reviewed implementation and an explicit deployment decision. Use the normal dry-run, confirm only the new allowlisted controller files change, apply with backups, restart the controller program as required for loaded Lua modules, and do not modify robot files for Stage 3.
+
+Before any movement:
+
+1. Physically verify Wheatley at commissioned `(0,0,0)` facing North. Confirm the robot journal is healthy/ready/trusted, record execution epoch and high water, and confirm the controller has no active/corrupt/uncertain navigation journal.
+2. Visually verify the one-block West target is open and safe. North is occupied by the Charger, South by the supply Ender Chest, and East by the factory wall; do not substitute another initial direction.
+3. Run `ocianav plan --x -1 --y 0 --z 0 --heading west`. Record its output and verify it performs no modem request or journal write.
+4. Run `ocianav status`, record robot energy/capacity, memory, pose, epoch/high water, journal metrics, and controller journal absence. Confirm status does not change robot high water or physical journal size except for ordinary timing observations.
+5. Exercise the cooperative owner with a harmless overlapping controller client and confirm the second client refuses before consuming port traffic. End the first client normally and confirm ownership releases.
+
+First movement fixture:
+
+```text
+Start:       (0,0,0) North
+Destination: (-1,0,0) West
+Outbound:    turn_left, move_forward
+Return:      move_backward, turn_right
+Final:       (0,0,0) North
+```
+
+Run `go` and type `NAVIGATE`. Record mission ID; execution epoch; every request ID/fingerprint; controller and robot high water before/after; intent/result journal sequence; before/expected/reported pose; response code/message; energy; physical observation; and proof that no sensing request occurred. At destination, independently verify `(-1,0,0)` West and inspect `ocianav status` without mutation.
+
+Run `return`, inspect the frozen two-entry breadcrumb inverse, and type `RETURN`. It must send `move_backward` then `turn_right`, reach exact home/North, request fresh status, persist `home_pose_reached`, keep `charging_verified=false`, write the appropriate terminal record, and archive the controller mission. Record the archive path and confirm a subsequent `status` reports no active mission plus live home state. Visible charging particles or an energy rise may be recorded as an observation but must not change Stage 3's charging flag or acceptance claim.
+
+Only after that fixture passes:
+
+1. Repeat a short straight-West trip, then one prepared open-area case where backward movement is nominally cheaper, recording exact inverse behavior.
+2. Restart `ocianav` after one completed outbound action and verify fresh status reconciliation plus deterministic continuation from actual pose.
+3. Use a safe receive-side harness to lose one successful reply. Verify the controller stops pending, `resume` requires `RESUME`, retransmits the identical ID, Wheatley returns the cached result, and the physical call occurs once.
+4. Exercise restart after a persisted unsent intent using a controlled pre-send hook. Verify first-send authority is absent after replay and only fresh exact retry can proceed.
+5. Place a safe solid obstruction in a prepared route. Verify one failed movement consumes its sequence, fresh status reconciles unchanged pose/high water, no sensor or detour request occurs, and supervised return uses only successful breadcrumbs after the obstruction is removed or an unblocked inverse exists.
+6. Restart during inverse return after one completed inverse and verify the durable cursor selects exactly the next inverse.
+7. Inject contradictory status/pose and a controlled persistence fault only through safe hooks or disposable state. Verify no subsequent physical request and preserve artifacts for inspection. Do not kill Minecraft during a physical operation.
+8. Measure controller free memory, journal bytes/records, append time, and archive behavior across the short fixtures. These are Stage 3 runtime observations, not general long-mission or power-loss proof.
+
+Acceptance requires physical observation to match every reported pose and request, exact home/North reconciliation, durable archive history, working manual recovery after ending `ocianav`, and zero sensor/probe calls. It does not accept obstacle avoidance, energy reserve, autonomous charging, unattended execution, or generalized outdoor navigation.
+
+#### Open questions, limitations, and authorization gate
+
+No unresolved architecture question prevents coding after review. The following are implementation-review questions whose answers are fixed by this plan and should be verified, not redesigned during coding:
+
+- Confirm the minimal local-nonsend transition clears only a controller-proven pre-send rejection and leaves every possibly delivered request pending.
+- Confirm the controller owner uses the installed OpenOS process registry rather than an exclusive file mode that OpenOS 1.8.8 does not expose.
+- Confirm the CLI's exact exit codes and cancellation behavior are consistent across direct OpenOS execution and host injection without calling `os.exit` before cleanup.
+- Confirm a recomputed outbound suffix is always derived from freshly reconciled durable pose and never used to bypass a pending exact request.
+- Confirm the action-budget formula counts consumed failures/nonexecutions and preserves capacity for the full actual breadcrumb return.
+
+Acceptable Stage 3 limitations are advisory rather than hostile-process exclusion, short supervised trips without a measured energy reserve, no sensing or obstacles, no automatic retry after a definite block, bounded retained-result recovery, no `fsync` or cross-computer transaction, no charging proof, and operator recovery after any ambiguous executing boundary. Stage 4 owns probes/detours; Stage 5 owns measured reserve and charging verification.
+
+**Authorization gate:** this section authorizes planning only. It does not authorize source, test, manifest, live-HDD, Minecraft, commit, or push changes. Independent review should first approve the conditional-GO verdict, the narrow local-nonsend correction, cooperative owner scope, execution/recovery ordering, and host/Minecraft gates. Only a later explicit Stage 3 implementation GO may begin step 1 above.
+
+### Stage 3 Implementation Results
+
+**Implementation status on 2026-11-01: complete and host-validated; ready for independent code review, not deployment.** The separately issued Stage 3 GO authorized repository implementation and host validation only. No live HDD was modified, no Minecraft movement or acceptance test occurred, and nothing was committed or pushed.
+
+Implemented files and decisions:
+
+- New controller `home/ocianav.lua` implements the closed `plan`, `go`, `status`, `return`, and `resume` CLI. `plan` loads only `ocia.nav` and `ocia.pose`; every live command constructs dependencies after parsing, holds cooperative port ownership for the whole live context, and releases that ownership plus any `openedHere` modem action through protected cleanup.
+- New controller `lib/ocia/controller_owner.lua` uses the OpenOS process registry as an advisory same-port owner. It reads each process's own metadata with `rawget`, so inherited parent metadata cannot masquerade as child ownership, and uses no persistent or automatically cleared disk lock. The implementation matches the official `1.12.2-forge/1.8.8` `process.lua`: `process.list` contains live process records, `findProcess()` returns the current record, child `data` inherits through `__index`, and process close removes the registry entry.
+- `drive.lua`, `ociactl.lua`, and `ociafarm.lua` acquire ownership before opening the modem or consuming events, preserve separate `openedHere` close behavior, and release on normal completion, cancellation/early return, or protected error. The legacy interactive driver and existing request formats are unchanged.
+- `nav_state.lua` now resolves only definite `local_nonsend` results by restoring the pending intent's original phase, clearing that provably unsent intent, and requiring fresh reconciliation without advancing high water, pose, action count, or breadcrumbs. Every potentially delivered or contradictory class retains the existing unresolved exact-request behavior.
+- `ocianav go` takes fresh eligible-home status for preview, requires literal `NAVIGATE`, then takes a second correlated status and requires identical readiness, health, epoch, high water, trusted pose, and home orientation before mission creation. A mismatch creates no journal and sends no physical request.
+- Each physical operation follows `prepareIntent -> canTransmit -> requestForPending -> transport -> recordResult`. Replay never regains first-send authority; `resume` requires literal `RESUME`, fresh status, `authorizeRetry`, `canRetryPending`, and `retryRequest` for the identical request. Clean no-pending outbound restart replans only the remaining suffix from freshly reconciled durable pose.
+- Return requires fresh preflight status, previews the inverse of successful actual breadcrumbs, requires literal `RETURN`, rechecks status before `beginReturn`, freezes the cursor, and advances only correlated successful inverse results. A second horizontal-only check rejects any pre-existing vertical breadcrumb before Stage 3 can transmit it. Exact home/North requires another fresh reconciliation; charging remains false. Full missions archive as `navigation_complete`, while a successful return after partial outbound execution archives as `aborted`.
+- `deploy.lua` now allowlists `ocianav.lua`, `controller_owner.lua`, `nav.lua`, and `nav_state.lua` on the controller only. Deployment regressions reject `var/lib/ocia/nav.state` as a manifest target and preserve active state, archive markers, archive history, robot state, and unrelated files.
+- New `tests/nav_cli_cases.lua` and `tests/nav_cli_test.lua` provide injected CLI, transport, process-registry, and in-memory journal fixtures. Existing Stage 2 and deployment cases cover the narrow journal correction and protected runtime files; `tests/run.lua` includes Stage 3.
+
+The approved nine-step sequence was followed without a protocol, robot firmware, configuration schema, journal format, or Stage 4/5 change. One defensive implementation detail was added during final review: Stage 3 rejects a legacy/pre-existing vertical breadcrumb before inverse return transmission, even though its own flat `go` path cannot create one. The CLI uses the Stage 2 persisted destination and breadcrumbs rather than adding a nominal route/index record, so clean outbound continuation is deterministic replanning from reconciled durable pose as anticipated by the plan.
+
+Host validation results:
+
+| Gate | Result |
+|---|---|
+| `lua5.3 tests/nav_test.lua` | 12 tests, 4,785 assertions, 0 failures |
+| `lua5.3 tests/nav_state_test.lua` | 28 tests, 710 assertions, 0 failures |
+| `lua5.3 tests/nav_cli_test.lua` | 23 tests, 182 assertions, 0 failures |
+| `lua5.3 tests/run.lua` | 103 tests, 13,777 assertions, 0 failures |
+| `lua5.3 tests/deploy_test.lua` | 26 tests, 173 assertions, 0 failures |
+| `rg --files -g '*.lua' -0 \| xargs -0 -n1 luac5.3 -p` | all repository Lua files parsed successfully |
+| `git diff --check` | clean |
+| `lua5.3 deploy.lua` | dry run only; expected controller changes, all robot entries unchanged, no files modified |
+
+Host coverage includes pure preview isolation, strict parsing and confirmations, home-only creation, post-confirmation epoch/high-water/pose/readiness/health drift, intent-before-send ordering, success breadcrumbs, definite obstruction, definite local nonsend, persistence faults, unsent replay, lost acknowledgment/cached exact-ID recovery, deterministic outbound continuation, action budgets, frozen inverse return, return restart, partial-mission abort archive, terminal rotation, read-only status, horizontal-only operations, ownership inheritance/conflict/cleanup, all four controller programs, and protected deployment state.
+
+Remaining limitations and review gates are unchanged in substance. Cooperative ownership excludes repository programs but not hostile or unmodified consumers. OpenOS registry cleanup after process exit is not proof that application-level modem cleanup ran. Controller and robot journals are independent and ordinary OpenOS flush/close is not `fsync`; sudden JVM/host/power loss remains a manual-recovery boundary. The 160-action/1024-record limits are host-tested, but live controller memory, timing, and archive behavior are unmeasured. There is no sensing, obstacle avoidance, vertical execution, energy reserve, charging proof, automatic provisioning, or unattended operation.
+
+**Next authorization gate:** independently review the Stage 3 diff and host evidence. If accepted, issue a separate deployment authorization for only the dry-run-listed controller files, then execute the documented supervised one-block-West fixture before any broader navigation test. Do not treat these host results as OpenOS or Minecraft acceptance.
+
+### Stage 3 Independent-Review Hardening Result
+
+**Refinement status on 2026-11-01: complete and host-validated; pending another independent review before deployment.** The review confirmed the major Stage 3 durability, exact-request recovery, actual-breadcrumb return, cooperative ownership, pure-plan, and deployment-boundary architecture. This pass changed only `home/ocianav.lua`, focused Stage 3 tests, and this working record. It did not change Stage 1, Stage 2 journal semantics or format, shared pose/protocol/transport, robot firmware, controller ownership, the deployment manifest, or any live HDD.
+
+The three findings and corrections are:
+
+1. **Pending `resume` lacked Stage 3 operation eligibility.** `runResume()` previously reached `authorizeRetry()` for any Stage 2-valid physical operation, including `move_up` and `move_down`. A shared `validateStage3Mission()` now runs before any resume retry authorization or movement and validates current/destination elevation, the pending operation and its before/expected poses, every successful outbound breadcrumb, completed return history, and all remaining frozen inverse operations. Incompatible state remains intact for read-only `status` and requires supervised manual recovery or a later navigation stage; it is never rewritten, discarded, or transmitted by Stage 3.
+2. **Initial return budget read the uninitialized cursor.** `runReturn()` previously called the in-progress `budgetReturn()` while `return_state.cursor` was still zero, then discovered an excess only after persisting `return_start`. Initial return now uses `physical_actions + #breadcrumbs` through a distinct `budgetInitialReturn()` before confirmation and again after post-confirmation reconciliation but before `beginReturn()`. An already-started return still uses `physical_actions + return_state.cursor`, and `completeReturn()` retains its defensive check.
+3. **`resume` confirmation lacked a complete action preview.** A phase-aware, read-only preview now precedes literal `RESUME`. Pending recovery prints mission/deployment identity, exact request ID and operation, before/expected poses, observation, same-ID semantics, and conditional outbound or frozen-return continuation. Clean outbound prints the recomputed ordered suffix, poses, consumed actions, round-trip requirement, and unobstructed-terrain assumption. Returning prints the frozen cursor, remaining inverse sequence, and budget. Nonmoving phases explicitly describe reconciliation, terminal, and archive work without calling it physical movement. The second status must exactly match the healthy epoch/high-water/trusted-pose evidence used for the preview. The prepared outbound suffix is reused for execution so an unchanged preview and execution cannot silently diverge.
+
+New focused regressions prove pending `move_up`/`move_down` stop before retry authorization or send; vertical history at flat current/destination poses and frozen vertical return remain nonexecutable while `status` stays read-only; valid flat exact-ID recovery remains intact; initial return succeeds exactly at its limit and rejects an over-by-one case containing a consumed failed action before `return_start`; a partially consumed frozen cursor uses its remaining count; all physical preview classes render before confirmation; nonmoving destination/home/terminal phases describe their actual transitions; cancellation writes and sends nothing; post-confirmation status contradiction stops; and displayed outbound operations equal transmitted operations when evidence is unchanged.
+
+Final host results for this refinement:
+
+| Gate | Result |
+|---|---|
+| `lua5.3 tests/nav_test.lua` | 12 tests, 4,785 assertions, 0 failures |
+| `lua5.3 tests/nav_state_test.lua` | 28 tests, 710 assertions, 0 failures |
+| `lua5.3 tests/nav_cli_test.lua` | 31 tests, 283 assertions, 0 failures |
+| `lua5.3 tests/run.lua` | 111 tests, 13,878 assertions, 0 failures |
+| `lua5.3 tests/deploy_test.lua` | 26 tests, 173 assertions, 0 failures |
+| `rg --files -g '*.lua' -0 \| xargs -0 -n1 luac5.3 -p` | all repository Lua files parsed successfully |
+| `git diff --check` | clean |
+| `lua5.3 deploy.lua` | dry run only; expected controller changes, every robot entry unchanged, no files modified |
+
+All previous live-world limitations remain: cooperative ownership is advisory, OpenOS flush/close is not `fsync`, independent controller/robot journals have no distributed transaction, live memory/timing/interruption behavior is unmeasured, and Stage 3 still provides no sensing, detours, vertical execution, energy reserve, charging proof, or unattended operation. Host success is not OpenOS or Minecraft acceptance.
+
+**Hardening authorization gate:** independently review this narrow correction and its regressions. Only after that review may a separate GO authorize controller deployment and the documented supervised one-block-West fixture. No deployment, commit, push, or Minecraft action was authorized or performed by this pass.
+
+### Stage 3 Final Regression Isolation Result
+
+**Final regression verdict on 2026-11-01: passed; ready for a separate controller-deployment authorization after review.** Independent review accepted the production hardening but found that the pending-vertical regression could be masked by the destination, pose, or breadcrumb checks. The focused test now creates independent generic Stage 2 missions for pending `move_up` and `move_down` with current pose and destination both `(0,0,0)` North/Y=0, healthy epoch/journal/high water, no breadcrumbs, no completed return history, and no frozen return. `nav_state.validate()` accepts each mission and `assessStatus()` explicitly returns `retry_identical`; the pending vertical operation and its expected vertical result are the only Stage 3 incompatibility.
+
+For each operation the test now requires the exact `cannot resume pending operation <operation>` diagnostic, no retry-authorization record, no physical send or execution, unchanged controller/robot high water and pending sequence/identity, a healthy replayable journal, and successful read-only `ocianav status` inspection. Sensitivity was demonstrated with a temporary removal of only the pending-operation branch in `validateStage3Mission()`: the focused suite failed on the exact diagnostic while the remaining mission/plan flatness checks stayed active. The approved branch was immediately restored, `git diff --check` remained clean, and the focused suite returned to green. No production source change remains from this pass; the only lasting code change is stronger test coverage in `tests/nav_cli_cases.lua`.
+
+Final host results are Stage 1 `12 / 4,785`, Stage 2 `28 / 710`, Stage 3 `31 / 345`, integrated `111 / 13,940`, and deployment `26 / 173`, all with zero failures. Every repository Lua file passes `luac5.3 -p`, `git diff --check` is clean, and the final deployment dry run reports only the expected controller creates/updates with every robot entry unchanged and no file modified. Runtime journals, archives, recovery markers, robot files, and other unlisted state remain outside the deployment manifest.
+
+The remaining gates are operational rather than code-design work: independent confirmation of this final regression, separately authorized controller-only deployment, OpenOS ownership/cleanup observation, and the supervised one-block-West round trip. No host result is Minecraft acceptance, and no deployment, commit, push, journal mutation, epoch change, or physical movement occurred in this pass.
+
 ### Purpose, operating envelope, and non-goals
 
 The first navigation target is short, supervised travel through mostly open Shrubland: modest hills, grass and shrubs, isolated trees, shallow depressions, and occasional structures. Wheatley should leave the commissioned home pose, reach a coordinate in the commissioned-origin frame, negotiate an ordinary small obstruction when possible, retain the actual route he traveled, and return to `(0,0,0)` facing North.
@@ -1193,7 +1493,7 @@ Implementation should be authorized and tested in these five stages:
 
 1. **Stage 1 — Pure nominal route planner (complete, host-validated 2026-11-01).** `nav.lua` accepts an explicit trusted start pose, validates signed commissioned-frame coordinates, enumerates heading/axis/backward choices, minimizes movement plus turns, honors an optional final heading, applies deterministic tie-breakers, and reports inverse cost. It has no component, transport, protocol, filesystem, or live-status dependency. The future CLI remains responsible for supplying home for a new mission.
 2. **Stage 2 — Durable controller mission journal (complete, hardened and host-validated 2026-11-01).** `nav_state.lua` implements the one-active-mission lifecycle, mandatory home start, intent/result ordering, actual-success breadcrumbs, duplicate-result protection, fresh-status-authorized identical pending-intent replay, consumed failure/nonexecution records, exact inverse-return progress, epoch/high-water/pose reconciliation, pre-write transition validation, checksummed replay, terminal archive rotation, and conservative fault handling. No Minecraft movement or deployment occurred.
-3. **Stage 3 — Flat supervised outbound navigation and inverse return.** Implement `plan`, `go`, `status`, `resume`, and basic `return` using only the existing physical OCIA operations. `go` starts only from fresh healthy/ready/trusted home status and temporarily restricts executable destinations to `y=0`; pure `plan` may still describe a nonzero-Y nominal route for later stages. No `nav_probe`, detours, automatic obstacle handling, or vertical terrain negotiation is included. Accept a short unobstructed outbound trip, durable actual-action breadcrumbs, normal restart/pending-intent reconciliation, and exact inverse return to `(0,0,0)` North. A definite obstruction stops safely. Instrumentation must show zero sensing requests, and arrival must not claim charging verification.
+3. **Stage 3 — Flat supervised outbound navigation and inverse return (implemented and host-validated 2026-11-01).** `plan`, `go`, `status`, `resume`, and basic `return` use only existing OCIA status/turn/forward/back operations. Home-only creation, post-confirmation status revalidation, durable actual-action breadcrumbs, exact-ID restart recovery, frozen inverse return, terminal archive rotation, horizontal-only enforcement, and cooperative controller ownership pass host tests. No deployment or Minecraft acceptance has occurred; the first one-block-West round trip remains the acceptance gate.
 4. **Stage 4 — Reactive obstacle handling.** Introduce work in independently testable increments: first generalize nonphysical `s:` IDs in protocol and transport; then add protected categorical `nav_probe`; then classify installed-version obstruction evidence; then add committed bounded lateral waypoints; then bounded elevation waypoints; finally return-obstruction recovery through committed breadcrumb anchors. Accept only after a definite `operation_failed` movement consumes its sequence, fresh status reconciles high water/pose, the next request is contiguous, committed waypoints cannot oscillate, an impassable fixture stops within limits, and return detours preserve the frozen outbound stack.
 5. **Stage 5 — Energy and charging integration.** Measure movement, turn, status, and probe energy costs; establish conservative preflight/return reserves and short-trip limits from evidence; then implement charging verification independently of home-pose arrival. Until this stage passes, all trips remain short and supervised and explicitly lack a validated energy-reserve guarantee.
 
@@ -1251,7 +1551,7 @@ If this design is accepted, `MVP_PLAN.md` should gain a navigation milestone bef
 
 ## Immediate Next Work
 
-Review the hardened Stage 2 mission journal, exact-retry contract, and host fault evidence. Stage 3 flat supervised outbound navigation and exact inverse return is the next implementation candidate but remains unauthorized until a separate explicit GO. Stage 3 must use `canTransmit` only for a newly persisted first send, and `authorizeRetry` plus `retryRequest` after restart or ambiguous delivery; it must integrate fresh status and the existing transport without adding Stage 4 sensing/detours or Stage 5 energy/charging claims. The already-completed supervised Potato prototype remains the physical-orchestration evidence on which the later execution design is based.
+Independently review the completed **Stage 3 independent-review hardening diff and host evidence** recorded in the Navigation MVP section. Verify especially that incompatible pending/history operations stop before retry authorization, initial return budgets actual breadcrumbs before `return_start`, every `resume` phase previews its complete possible work before confirmation, and post-confirmation status cannot silently change that preview. Reconfirm the previously accepted post-`NAVIGATE` check, definite-local-nonsend transition, exact-ID retry, actual-breadcrumb return, cooperative ownership cleanup, and protected deployment targets remain intact. Stage 3 is host-complete but not authorized for deployment. If review accepts it, the next separate GO should authorize only the dry-run-listed controller deployment, followed by the documented supervised one-block-West fixture. Do not begin Stage 4/5 work or describe host results as Minecraft acceptance.
 
 The deferred Milestone 1 acceptance queue remains:
 

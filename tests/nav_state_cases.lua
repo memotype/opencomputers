@@ -551,9 +551,31 @@ function cases.register(harness)
   end)
 
   test("transport and robot failure classes retain distinct policies", function()
+    do
+      local store = navState.memoryStore()
+      local snapshot = mission(store)
+      intent(store, snapshot, "turn_left")
+      local classified = assert(navState.recordResult(store, snapshot,
+        {status = "local_rejection", code = "invalid_request", message = "bad"}))
+      equal(classified.kind, "local_nonsend")
+      equal(classified.ambiguous, false)
+      equal(snapshot.phase, "outbound")
+      equal(snapshot.pending, nil)
+      equal(snapshot.high_water, 0)
+      equal(snapshot.physical_actions, 0)
+      equal(#snapshot.breadcrumbs, 0)
+      equal(snapshot.reconciliation_required, true)
+      equal(navState.prepareIntent(store, snapshot, {
+        operation = "turn_left", recipient = robotAddress}), nil)
+      truthy(navState.recordReconciliation(store, snapshot, robotStatus()))
+      local nextIntent = intent(store, snapshot, "turn_left")
+      equal(nextIntent.request_id, "p:" .. epoch .. ":1")
+      local replayed = reload(store)
+      equal(replayed.high_water, 0)
+      equal(replayed.pending.request_id, nextIntent.request_id)
+    end
+
     local fixtures = {
-      {{status = "local_rejection", code = "invalid_request", message = "bad"},
-        "local_nonsend", false},
       {{status = "send_failed", code = "send_failed", message = "down"},
         "send_ambiguous", true},
       {{status = "timeout", code = "outcome_unknown", message = "late"},

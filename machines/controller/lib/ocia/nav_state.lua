@@ -402,7 +402,18 @@ function state.applyRecord(snapshot, fields)
       classification = classification, code = fields.code or "",
       message = fields.message or ""
     }
-    if classification == "success" or classification == "completed_failure"
+    if classification == "local_nonsend" then
+      if snapshot.phase == "recovery_required" then
+        snapshot.phase = snapshot.pending.phase
+      end
+      snapshot.reconciliation_required = true
+      snapshot.failures[#snapshot.failures + 1] = {
+        request_id = fields.request_id, sequence = snapshot.pending.sequence,
+        classification = classification, code = fields.code or "",
+        message = fields.message or ""
+      }
+      snapshot.pending = nil
+    elseif classification == "success" or classification == "completed_failure"
         or classification == "definite_nonexecution" then
       local sequence, reason = number(fields, "sequence", 1)
       if not sequence then return nil, reason end
