@@ -1281,17 +1281,19 @@ The existing controller journal, physical request sequencing, status reconciliat
 
 Return still freezes and reverses only confirmed successful outbound breadcrumbs. Vertical actions and detour turns/movements therefore return through the same existing inverse mechanism. Return retries a temporary entity obstruction twice with new request IDs, but a new solid obstruction stops for operator intervention.
 
+Independent review of commit `c8cdee1` found that reactive outbound actions could consume the capacity reserved for inverse return. The controller now checks the shared outbound request boundary before persisting every new physical intent. It reserves one action for the attempt plus an inverse action for every existing successful breadcrumb and for the new action if it succeeds. Definite failures therefore reduce remaining outbound capacity without increasing return length. When the reservation cannot be maintained, navigation stops before creating or sending another request and the existing breadcrumbs remain returnable. Focused climb, lateral-detour, and entity-retry fixtures exercise this exact boundary and complete supervised inverse return afterward.
+
 Host validation after implementation:
 
 | Gate | Result |
 |---|---|
-| `lua5.3 tests/nav_cli_test.lua` | 39 tests, 333 assertions, 0 failures |
-| `lua5.3 tests/run.lua` | 120 tests, 13,941 assertions, 0 failures |
+| `lua5.3 tests/nav_cli_test.lua` | 42 tests, 367 assertions, 0 failures |
+| `lua5.3 tests/run.lua` | 123 tests, 13,975 assertions, 0 failures |
 | `lua5.3 tests/deploy_test.lua` | 26 tests, 173 assertions, 0 failures |
 | all repository Lua files through `luac5.3 -p` | passed |
 | `git diff --check` | clean |
 
-Material limitations remain intentionally small: no terrain map or general path search; at most one-block reactive climbs; short lateral detours; two entity retries; no excavation, placement, or mob attacks; no automatic return replanning around a new solid obstacle; no measured energy reserve; and no charging verification. Forward travel remains optimistic, while downward movement and reactive detours refuse detected liquid or unknown adjacent terrain. Initial Minecraft tests must be short, supervised, and begin with disposable one-step fixtures before the proposed `(-15,+4,-1)` trip.
+Material limitations remain intentionally small: no terrain map or general path search; at most one-block reactive climbs; short lateral detours; two entity retries; no excavation, placement, or mob attacks; no automatic return replanning around a new solid obstacle; no measured energy reserve; and no charging verification. Forward travel remains optimistic, while downward movement and reactive detours refuse detected liquid or unknown adjacent terrain. `detectDown()` describes only the cell immediately below Wheatley; it does not prove that a horizontal destination has supporting ground, establish the depth of a drop, or make a route-level ground-support guarantee. Initial Minecraft tests must be short, supervised, and begin with disposable one-step fixtures before the proposed `(-15,+4,-1)` trip.
 
 ### Purpose, operating envelope, and non-goals
 

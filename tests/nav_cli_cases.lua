@@ -489,6 +489,86 @@ function cases.register(harness)
     contains(table.concat(f.errors, "\n"), "both lateral detours failed")
   end)
 
+  test("outbound climb preserves exact inverse return budget", function()
+    local f = fixture({reads = {"RESUME", "RETURN"}, endpoint = {
+      fail = function(operation, robot)
+        return operation == "move_forward" and robot.pose.y == 0
+          and robot.pose.z == 0 and "solid"
+      end,
+      probe = function(robot)
+        if robot.pose.y == 0 and robot.pose.z == 0 then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = false, up_kind = "air"}
+        end
+      end
+    }})
+    createMissionFor(f, "mission-budget-climb", {x = 0, y = 1, z = -1}, 4)
+    equal(run(f, {"resume"}), 1)
+    local stopped = assert(f.store.snapshot())
+    equal(stopped.physical_actions, 2)
+    equal(stopped.high_water, 2)
+    equal(#stopped.breadcrumbs, 1)
+    equal(stopped.breadcrumbs[1].operation, "move_up")
+    contains(table.concat(f.errors, "\n"), "insufficient physical-action budget")
+    equal(run(f, {"return"}), 0)
+    local completed = assert(f.store.live())
+    equal(completed.physical_actions, 3)
+    equal(completed.return_state.steps[1].operation, "move_down")
+    truthy(f.store.archived())
+  end)
+
+  test("outbound lateral detour preserves exact inverse return budget", function()
+    local f = fixture({reads = {"RESUME", "RETURN"}, endpoint = {
+      fail = function(operation, robot)
+        return operation == "move_forward" and robot.pose.x == 0
+          and robot.pose.z == 0 and robot.pose.heading == "north" and "solid"
+      end,
+      probe = function(robot)
+        if robot.pose.x == 0 and robot.pose.z == 0
+            and robot.pose.heading == "north" then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = true, up_kind = "solid"}
+        end
+      end
+    }})
+    createMissionFor(f, "mission-budget-detour", {x = 0, y = 0, z = -1}, 5)
+    equal(run(f, {"resume"}), 1)
+    local stopped = assert(f.store.snapshot())
+    equal(stopped.physical_actions, 3)
+    equal(stopped.high_water, 3)
+    equal(#stopped.breadcrumbs, 2)
+    equal(stopped.breadcrumbs[1].operation, "turn_left")
+    equal(stopped.breadcrumbs[2].operation, "move_forward")
+    contains(table.concat(f.errors, "\n"), "insufficient physical-action budget")
+    equal(run(f, {"return"}), 0)
+    local completed = assert(f.store.live())
+    equal(completed.physical_actions, 5)
+    equal(table.concat({completed.return_state.steps[1].operation,
+      completed.return_state.steps[2].operation}, ","), "move_backward,turn_right")
+    truthy(f.store.archived())
+  end)
+
+  test("outbound entity retries preserve exact inverse return budget", function()
+    local f = fixture({reads = {"RESUME", "RETURN"}, endpoint = {
+      fail = function(operation)
+        return operation == "move_forward" and "entity"
+      end
+    }})
+    createMissionFor(f, "mission-budget-entity", {x = 0, y = 0, z = -1}, 3)
+    equal(run(f, {"resume"}), 1)
+    local stopped = assert(f.store.snapshot())
+    equal(stopped.physical_actions, 2)
+    equal(stopped.high_water, 2)
+    equal(#stopped.breadcrumbs, 0)
+    equal(f.robot.sleep_calls, 2)
+    contains(table.concat(f.errors, "\n"), "insufficient physical-action budget")
+    equal(run(f, {"return"}), 0)
+    local completed = assert(f.store.live())
+    equal(completed.physical_actions, 2)
+    equal(#completed.return_state.steps, 0)
+    truthy(f.store.archived())
+  end)
+
   test("controller intent and result persistence faults stop progression", function()
     local intentFault = fixture({reads = {"NAVIGATE"}})
     intentFault.store.fail_at = 1

@@ -392,7 +392,21 @@ local function recordAndReport(context, snapshot, response, dependencies)
   return nil, "physical execution stopped after " .. classification.kind, classification
 end
 
+local function guardOutboundReturnBudget(snapshot)
+  if snapshot.phase ~= "outbound" then return true end
+  local limit = tonumber(snapshot.limits.action_limit)
+  local requiredIfSuccessful = snapshot.physical_actions + 1
+    + #snapshot.breadcrumbs + 1
+  if requiredIfSuccessful > limit then
+    return nil, "outbound action refused: insufficient physical-action budget "
+      .. "to reverse all successful breadcrumbs"
+  end
+  return true
+end
+
 local function executeOperation(context, snapshot, operation, dependencies)
+  local budgetOk, budgetReason = guardOutboundReturnBudget(snapshot)
+  if not budgetOk then return nil, budgetReason end
   local pending, reason = context.navState.prepareIntent(context.store, snapshot, {
     operation = operation, arguments = {}, recipient = context.config.robot_address
   })
