@@ -34,6 +34,11 @@ local function copy(value)
   return result
 end
 
+local function publish(target, source)
+  for key in pairs(target) do target[key] = nil end
+  for key, value in pairs(source) do target[key] = value end
+end
+
 local function integer(value)
   return type(value) == "number"
     and value == value
@@ -246,6 +251,12 @@ function state.validate(snapshot)
         or type(item.arguments_raw) ~= "string" or type(item.fingerprint) ~= "string" then
       return nil, "pending physical intent is invalid"
     end
+    if type(item.retry_authorized) ~= "boolean" then
+      return nil, "pending retry authorization is invalid"
+    end
+    if type(item.transmit_authorized) ~= "boolean" then
+      return nil, "pending initial-transmit authorization is invalid"
+    end
   end
   if snapshot.phase == "terminal" and not snapshot.terminal then
     return nil, "terminal phase requires a terminal outcome"
@@ -379,7 +390,8 @@ function state.applyRecord(snapshot, fields)
       operation = fields.operation, arguments_raw = fields.arguments or "",
       fingerprint = fields.fingerprint, before = before, expected = expected,
       phase = fields.intent_phase, effect = fields.effect,
-      observation = nil
+      observation = nil, transmit_authorized = true,
+      retry_authorized = false, retry_status = nil
     }
   elseif kind == "result" then
     if not snapshot.pending or snapshot.pending.request_id ~= fields.request_id then
@@ -395,6 +407,9 @@ function state.applyRecord(snapshot, fields)
       local sequence, reason = number(fields, "sequence", 1)
       if not sequence then return nil, reason end
       if sequence ~= snapshot.pending.sequence then return nil, "result sequence mismatch" end
+      if snapshot.phase == "recovery_required" then
+        snapshot.phase = snapshot.pending.phase
+      end
       snapshot.high_water = sequence
       snapshot.physical_actions = snapshot.physical_actions + 1
       if classification == "success" then
@@ -434,6 +449,9 @@ function state.applyRecord(snapshot, fields)
       end
       snapshot.pending = nil
     else
+      snapshot.pending.retry_authorized = false
+      snapshot.pending.transmit_authorized = false
+      snapshot.pending.retry_status = nil
       snapshot.phase = "recovery_required"
       snapshot.failures[#snapshot.failures + 1] = {
         request_id = fields.request_id, sequence = snapshot.pending.sequence,
@@ -441,6 +459,37 @@ function state.applyRecord(snapshot, fields)
         message = fields.message or ""
       }
     end
+  elseif kind == "retry_authorized" then
+    if not snapshot.pending or snapshot.pending.request_id ~= fields.request_id then
+      return nil, "retry authorization has no matching pending intent"
+    end
+    local observation = snapshot.pending.observation
+    if observation and observation.classification ~= "timeout"
+        and observation.classification ~= "send_ambiguous" then
+      return nil, "pending observation is not eligible for identical retry"
+    end
+    local highWater, reason = number(fields, "high_water", 0)
+    if not highWater then return nil, reason end
+    local current; current, reason = readPose(fields, "pose")
+    if not current then return nil, reason end
+    if fields.epoch ~= snapshot.robot_epoch then
+      return nil, "retry authorization epoch contradicts mission"
+    end
+    if highWater == snapshot.high_water then
+      if not samePose(current, snapshot.pending.before) then
+        return nil, "unallocated retry status pose contradicts intent"
+      end
+    elseif highWater == snapshot.pending.sequence then
+      if not samePose(current, snapshot.pending.before)
+          and not samePose(current, snapshot.pending.expected) then
+        return nil, "allocated retry status pose contradicts possible outcomes"
+      end
+    else
+      return nil, "retry authorization high water contradicts pending intent"
+    end
+    snapshot.pending.retry_authorized = true
+    snapshot.pending.retry_status = {epoch = fields.epoch, high_water = highWater,
+      pose = current}
   elseif kind == "reconcile" then
     local highWater, reason = number(fields, "high_water", 0)
     if not highWater then return nil, reason end
@@ -579,7 +628,29 @@ end
 function state.canTransmit(snapshot)
   return snapshot.journal.health == "healthy" and snapshot.pending ~= nil
     and snapshot.pending.observation == nil
+    and snapshot.pending.transmit_authorized == true
     and snapshot.phase ~= "terminal"
+end
+
+local function retryablePending(snapshot)
+  local observation = snapshot.pending and snapshot.pending.observation
+  return snapshot.pending and (observation == nil
+    or observation.classification == "timeout"
+    or observation.classification == "send_ambiguous")
+end
+
+function state.canRetryPending(snapshot)
+  return snapshot.journal.health == "healthy"
+    and snapshot.phase ~= "terminal"
+    and retryablePending(snapshot)
+    and snapshot.pending.retry_authorized == true
+end
+
+function state.retryRequest(snapshot)
+  if not state.canRetryPending(snapshot) then
+    return nil, "identical pending-request retry is not authorized by fresh status"
+  end
+  return requestFromIntent(snapshot.pending)
 end
 
 local function responseCorrelates(intent, response)
@@ -614,6 +685,14 @@ end
 local function payloadPose(payload)
   if type(payload) ~= "table" then return nil, "reply payload is missing" end
   return statusPose(payload)
+end
+
+local function hasPoseEvidence(payload)
+  if type(payload) ~= "table" then return false end
+  for _, key in ipairs({"pose_trusted", "x", "y", "z", "heading", "pose_reason"}) do
+    if payload[key] ~= nil then return true end
+  end
+  return false
 end
 
 function state.classify(snapshot, response)
@@ -660,12 +739,21 @@ function state.classify(snapshot, response)
     return {kind = "completed_failure", consumes_sequence = true, ambiguous = false,
       code = code, message = response.message or "", after = resulting}
   end
-  if outcome == "failed" and code == "interrupted_before_execution"
-      and response.payload and response.payload.physical_outcome == "not_started" then
-    local resulting, reason = payloadPose(response.payload)
-    if not resulting or not samePose(resulting, intent.before) then
+  if outcome == "failed" and code == "interrupted_before_execution" then
+    if not response.payload or response.payload.physical_outcome ~= "not_started" then
       return {kind = "contradictory_response", consumes_sequence = false,
-        ambiguous = true, code = "pose_contradiction", message = reason or "nonexecution pose changed"}
+        ambiguous = true, code = "physical_outcome_contradiction",
+        message = "interrupted-before-execution lacks authoritative not_started evidence"}
+    end
+    local resulting = intent.before
+    if hasPoseEvidence(response.payload) then
+      local reason
+      resulting, reason = payloadPose(response.payload)
+      if not resulting or not samePose(resulting, intent.before) then
+        return {kind = "contradictory_response", consumes_sequence = false,
+          ambiguous = true, code = "pose_contradiction",
+          message = reason or "nonexecution pose changed"}
+      end
     end
     return {kind = "definite_nonexecution", consumes_sequence = true, ambiguous = false,
       code = code, message = response.message or "", after = resulting}
@@ -706,6 +794,10 @@ function state.assessStatus(snapshot, robotStatus)
     return {ok = false, action = "manual_recovery", reason = "robot epoch mismatch"}
   end
   if snapshot.pending then
+    if not retryablePending(snapshot) then
+      return {ok = false, action = "manual_recovery",
+        reason = "pending result classification does not permit retry"}
+    end
     if normalized.high_water < snapshot.high_water
         or normalized.high_water > snapshot.pending.sequence then
       return {ok = false, action = "manual_recovery", reason = "robot high water contradicts pending intent"}
@@ -729,6 +821,25 @@ function state.assessStatus(snapshot, robotStatus)
     return {ok = false, action = "manual_recovery", reason = "robot pose disagrees with mission"}
   end
   return {ok = true, action = "continue", normalized = normalized}
+end
+
+function state.authorizeRetry(store, snapshot, robotStatus)
+  if not retryablePending(snapshot) then
+    return nil, "pending observation is not eligible for identical retry"
+  end
+  local assessment = state.assessStatus(snapshot, robotStatus)
+  if not assessment.ok or assessment.action ~= "retry_identical" then
+    return nil, assessment.reason or "robot status does not authorize identical retry"
+  end
+  local normalized, reason = validateRobotStatus(robotStatus)
+  if not normalized then return nil, reason end
+  local fields = {kind = "retry_authorized", request_id = snapshot.pending.request_id,
+    epoch = normalized.epoch, high_water = normalized.high_water}
+  poseFields("pose", normalized.pose, fields)
+  local appended, appendReason = store.append(snapshot, fields)
+  if not appended then return nil, appendReason end
+  return {ok = true, action = "retry_identical",
+    request = requestFromIntent(snapshot.pending)}
 end
 
 function state.recordReconciliation(store, snapshot, robotStatus)
@@ -762,6 +873,10 @@ function state.journalStore(path, options)
   local open = options.open or io.open
   local timer = options.timer or require("computer").uptime
   local archiveMarker = path .. ".archive.switch"
+  local maxRecords = options.max_records or state.MAX_RECORDS
+  if not integer(maxRecords) or maxRecords < 1 or maxRecords > state.MAX_RECORDS then
+    error("max_records must be between 1 and " .. state.MAX_RECORDS, 2)
+  end
   local store = {health = "uninitialized", records = 0, bytes = 0,
     last_persist_ms = 0}
 
@@ -828,7 +943,7 @@ function state.journalStore(path, options)
       if not applied then close(handle); store.health = "corrupt";
         return nil, {source = "corrupt", error = applyReason} end
       expected = expected + 1
-      if expected > state.MAX_RECORDS + 1 then close(handle); store.health = "corrupt";
+      if expected > maxRecords + 1 then close(handle); store.health = "corrupt";
         return nil, {source = "corrupt", error = "journal exceeds bounded record limit"} end
     end
     local closed, closeReason = close(handle)
@@ -839,40 +954,45 @@ function state.journalStore(path, options)
     if consumed ~= fileSize(path) then store.health = "corrupt";
       return nil, {source = "corrupt", error = "journal has a partial final record"} end
     store.health, store.records, store.bytes = "healthy", expected - 1, fileSize(path)
+    if snapshot.pending then
+      snapshot.pending.transmit_authorized = false
+      snapshot.pending.retry_authorized = false
+    end
     snapshot.journal = {health = "healthy", records = store.records,
       bytes = store.bytes, last_persist_ms = store.last_persist_ms}
     return snapshot, {source = path}
   end
 
   local function persist(snapshot, fields, mode, alreadyApplied)
-    if store.records >= state.MAX_RECORDS then return nil, "journal record limit reached" end
-    fields.journal_sequence = mode == "w" and 1 or store.records + 1
-    local line, encodeReason = state.encodeRecord(fields)
+    if store.records >= maxRecords then return nil, "journal record limit reached" end
+    local record = copy(fields)
+    record.journal_sequence = mode == "w" and 1 or store.records + 1
+    local candidate = copy(snapshot)
+    if alreadyApplied then
+      local valid, validationReason = state.validate(candidate)
+      if not valid then return nil, validationReason end
+    else
+      local applied, applyReason = state.applyRecord(candidate, record)
+      if not applied then return nil, applyReason end
+    end
+    local line, encodeReason = state.encodeRecord(record)
     if not line then return nil, encodeReason end
     local started = timer()
     local wrote, reason = writeLine(path, mode, line)
     store.last_persist_ms = math.floor((timer() - started) * 1000 + 0.5)
-    snapshot.journal.last_persist_ms = store.last_persist_ms
     if not wrote then
       store.health = "uncertain_write"
+      snapshot.journal.last_persist_ms = store.last_persist_ms
       snapshot.journal.health = store.health
       snapshot.phase = "recovery_required"
       return nil, reason
     end
-    if not alreadyApplied then
-      local applied, applyReason = state.applyRecord(snapshot, fields)
-      if not applied then
-        store.health = "invalid_append"
-        snapshot.journal.health = store.health
-        snapshot.phase = "recovery_required"
-        return nil, applyReason
-      end
-    end
     store.health = "healthy"
-    store.records = fields.journal_sequence
+    store.records = record.journal_sequence
     store.bytes = fileSize(path)
-    snapshot.journal = {health = store.health, records = store.records,
+    candidate.journal = {health = store.health, records = store.records,
       bytes = store.bytes, last_persist_ms = store.last_persist_ms}
+    publish(snapshot, candidate)
     return true
   end
 
@@ -880,6 +1000,8 @@ function state.journalStore(path, options)
     if filesystem.exists(path) or filesystem.exists(archiveMarker) then
       return nil, "an active or uncertain navigation journal already exists"
     end
+    local valid, validationReason = state.validate(snapshot)
+    if not valid then return nil, validationReason end
     local directoryOk, directoryReason = ensureDirectory()
     if not directoryOk then return nil, "directory creation failed: " .. tostring(directoryReason) end
     store.health, store.records = "healthy", 0
@@ -921,22 +1043,36 @@ function state.journalStore(path, options)
   return store
 end
 
-function state.memoryStore()
+function state.memoryStore(options)
+  options = options or {}
+  local maxRecords = options.max_records or state.MAX_RECORDS
+  if not integer(maxRecords) or maxRecords < 1 or maxRecords > state.MAX_RECORDS then
+    error("max_records must be between 1 and " .. state.MAX_RECORDS, 2)
+  end
   local stored, records = nil, {}
   local store = {health = "uninitialized", fail_at = nil, append_count = 0}
   function store.create(snapshot)
     if stored then return nil, "an active navigation journal already exists" end
-    local fields = missionFields(snapshot)
+    local candidate = copy(snapshot)
+    local valid, validationReason = state.validate(candidate)
+    if not valid then return nil, validationReason end
+    local fields = missionFields(candidate)
     fields.journal_sequence = 1
     records = {copy(fields)}
-    stored = copy(snapshot)
-    stored.journal = {health = "healthy", records = 1,
+    candidate.journal = {health = "healthy", records = 1,
       bytes = #(assert(state.encodeRecord(fields))), last_persist_ms = 0}
-    snapshot.journal = copy(stored.journal)
+    publish(snapshot, candidate)
+    stored = copy(candidate)
     store.health = "healthy"
     return true
   end
   function store.append(snapshot, fields)
+    if #records >= maxRecords then return nil, "journal record limit reached" end
+    local record = copy(fields)
+    record.journal_sequence = #records + 1
+    local candidate = copy(snapshot)
+    local applied, reason = state.applyRecord(candidate, record)
+    if not applied then return nil, reason end
     store.append_count = store.append_count + 1
     if store.fail_at == store.append_count then
       store.health = "uncertain_write"
@@ -944,19 +1080,24 @@ function state.memoryStore()
       snapshot.phase = "recovery_required"
       return nil, "injected persistence failure"
     end
-    fields.journal_sequence = #records + 1
-    local applied, reason = state.applyRecord(snapshot, fields)
-    if not applied then return nil, reason end
-    records[#records + 1] = copy(fields)
+    records[#records + 1] = record
     local bytes = 0
     for _, record in ipairs(records) do bytes = bytes + #(assert(state.encodeRecord(record))) end
-    snapshot.journal = {health = "healthy", records = #records, bytes = bytes,
+    candidate.journal = {health = "healthy", records = #records, bytes = bytes,
       last_persist_ms = 0}
-    stored = copy(snapshot)
+    publish(snapshot, candidate)
+    stored = copy(candidate)
     store.health = "healthy"
     return true
   end
-  function store.load() return stored and copy(stored) or nil, {source = "memory"} end
+  function store.load()
+    local loaded = stored and copy(stored) or nil
+    if loaded and loaded.pending then
+      loaded.pending.transmit_authorized = false
+      loaded.pending.retry_authorized = false
+    end
+    return loaded, {source = "memory"}
+  end
   function store.records() return copy(records) end
   return store
 end

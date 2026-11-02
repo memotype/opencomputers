@@ -67,6 +67,20 @@ function cases.register(harness)
     }
   end
 
+  local function wireResponse(snapshot, outcome, payload)
+    local request = assert(navState.requestForPending(snapshot))
+    return {
+      certainty = protocol.certainty(outcome), status = outcome,
+      code = payload.code, message = payload.message, payload = payload,
+      request = request,
+      reply = {
+        version = protocol.VERSION, request_id = request.request_id,
+        deployment_id = request.deployment_id, operation = request.operation,
+        outcome = outcome, payload = payload
+      }
+    }
+  end
+
   local function success(snapshot)
     return resultResponse(snapshot, "succeeded", "operation_succeeded",
       snapshot.pending.expected)
@@ -76,6 +90,30 @@ function cases.register(harness)
     local loaded, metadata = store.load()
     truthy(loaded, metadata and metadata.error)
     return loaded
+  end
+
+  local function sameValue(left, right, seen)
+    if type(left) ~= type(right) then return false end
+    if type(left) ~= "table" then return left == right end
+    seen = seen or {}
+    if seen[left] == right then return true end
+    seen[left] = right
+    for key, value in pairs(left) do
+      if not sameValue(value, right[key], seen) then return false end
+    end
+    for key in pairs(right) do
+      if left[key] == nil then return false end
+    end
+    return true
+  end
+
+  local function replayComparable(value)
+    local result = navState.copy(value)
+    if result.pending then
+      result.pending.transmit_authorized = false
+      result.pending.retry_authorized = false
+    end
+    return result
   end
 
   local function virtualFilesystem()
@@ -162,10 +200,12 @@ function cases.register(harness)
     return v
   end
 
-  local function fileStore(vfs)
+  local function fileStore(vfs, options)
+    options = options or {}
     local clock = 0
     return navState.journalStore("/state/nav.state", {
       filesystem = vfs, open = vfs.open,
+      max_records = options.max_records,
       timer = function() clock = clock + 0.001; return clock end
     })
   end
@@ -278,6 +318,236 @@ function cases.register(harness)
     equal(#snapshot.breadcrumbs, 0)
     equal(snapshot.pose.heading, "north")
     equal(snapshot.reconciliation_required, true)
+  end)
+
+  test("real robot prepared-recovery payload is definite nonexecution", function()
+    local store = navState.memoryStore()
+    local snapshot = mission(store)
+    intent(store, snapshot, "move_forward")
+    local response = wireResponse(snapshot, "failed", {
+      code = "interrupted_before_execution",
+      message = "request was prepared but physical execution had not begun",
+      physical_outcome = "not_started"
+    })
+    local classified = assert(navState.recordResult(store, snapshot, response))
+    equal(classified.kind, "definite_nonexecution")
+    equal(snapshot.high_water, 1)
+    truthy(pose.equal(snapshot.pose, navState.homePose()))
+    equal(#snapshot.breadcrumbs, 0)
+    equal(navState.prepareIntent(store, snapshot, {
+      operation = "turn_left", recipient = robotAddress}), nil)
+
+    local invalidStatuses = {
+      {pose = pose.new(1, 0, 0, "north")}, {epoch = otherEpoch},
+      {mode = "recovery_required"}, {journal_health = "corrupt"},
+      {high_water = 0}, {high_water = 2}
+    }
+    for _, override in ipairs(invalidStatuses) do
+      equal(navState.recordReconciliation(store, snapshot,
+        robotStatus(override)), nil)
+    end
+    truthy(navState.recordReconciliation(store, snapshot,
+      robotStatus({high_water = 1, pose = navState.homePose()})))
+    local nextIntent = intent(store, snapshot, "turn_left")
+    equal(nextIntent.request_id, "p:" .. epoch .. ":2")
+
+    local contradictoryStore = navState.memoryStore()
+    local contradictory = mission(contradictoryStore)
+    intent(contradictoryStore, contradictory, "move_forward")
+    local contradictoryPayload = {
+      code = "interrupted_before_execution", message = "not started",
+      physical_outcome = "not_started", pose_trusted = "true",
+      x = "1", y = "0", z = "0", heading = "north", pose_reason = ""
+    }
+    equal(assert(navState.recordResult(contradictoryStore, contradictory,
+      wireResponse(contradictory, "failed", contradictoryPayload))).kind,
+      "contradictory_response")
+
+    for _, physicalOutcome in ipairs({false, "unknown"}) do
+      local invalidStore = navState.memoryStore()
+      local invalid = mission(invalidStore)
+      intent(invalidStore, invalid, "move_forward")
+      local payload = {code = "interrupted_before_execution", message = "bad evidence"}
+      if physicalOutcome then payload.physical_outcome = physicalOutcome end
+      equal(assert(navState.recordResult(invalidStore, invalid,
+        wireResponse(invalid, "failed", payload))).kind,
+        "contradictory_response")
+      truthy(invalid.pending)
+      equal(invalid.high_water, 0)
+    end
+  end)
+
+  test("ambiguous result recovery authorizes only an identical retry", function()
+    local vfs = virtualFilesystem()
+    local store = fileStore(vfs)
+    local snapshot = mission(store)
+    intent(store, snapshot, "move_forward")
+    local original = assert(navState.requestForPending(snapshot))
+    local physicalCalls, cached = 0, nil
+    local function robotEndpoint(request)
+      if not cached then
+        physicalCalls = physicalCalls + 1
+        cached = success(snapshot)
+      end
+      equal(request.request_id, original.request_id)
+      equal(request.fingerprint, original.fingerprint)
+      return cached
+    end
+
+    robotEndpoint(original) -- result is deliberately lost
+    assert(navState.recordResult(store, snapshot, {
+      status = "timeout", code = "outcome_unknown", message = "lost reply"
+    }))
+    equal(physicalCalls, 1)
+    equal(navState.canTransmit(snapshot), false)
+
+    local restartedStore = fileStore(vfs)
+    snapshot = reload(restartedStore)
+    equal(navState.canTransmit(snapshot), false)
+    equal(navState.canRetryPending(snapshot), false)
+    local authorization = assert(navState.authorizeRetry(restartedStore, snapshot,
+      robotStatus({high_water = 1, pose = snapshot.pending.expected})))
+    equal(authorization.action, "retry_identical")
+    local retry = assert(navState.retryRequest(snapshot))
+    equal(retry.request_id, original.request_id)
+    equal(retry.fingerprint, original.fingerprint)
+
+    local cachedResult = robotEndpoint(retry)
+    assert(navState.recordResult(restartedStore, snapshot, cachedResult))
+    equal(physicalCalls, 1)
+    equal(snapshot.high_water, 1)
+    equal(#snapshot.breadcrumbs, 1)
+    truthy(pose.equal(snapshot.pose, pose.new(0, 0, -1, "north")))
+    equal(navState.recordResult(restartedStore, snapshot, cachedResult), nil)
+    local nextIntent = intent(restartedStore, snapshot, "turn_left")
+    equal(nextIntent.request_id, "p:" .. epoch .. ":2")
+  end)
+
+  test("retry authorization is fresh exact and fail-closed", function()
+    local vfs = virtualFilesystem()
+    local store = fileStore(vfs)
+    local snapshot = mission(store)
+    intent(store, snapshot, "turn_left")
+    assert(navState.recordResult(store, snapshot, {
+      status = "send_failed", code = "send_failed", message = "ambiguous send"
+    }))
+
+    for _, override in ipairs({
+      {epoch = otherEpoch}, {mode = "recovery_required"},
+      {journal_health = "corrupt"}, {high_water = 2},
+      {high_water = 0, pose = pose.new(1, 0, 0, "north")}
+    }) do
+      equal(navState.authorizeRetry(store, snapshot, robotStatus(override)), nil)
+      equal(navState.canRetryPending(snapshot), false)
+    end
+
+    truthy(navState.authorizeRetry(store, snapshot, robotStatus()))
+    truthy(navState.canRetryPending(snapshot))
+    local replayedStore = fileStore(vfs)
+    local replayed = reload(replayedStore)
+    equal(navState.canRetryPending(replayed), false)
+    equal(navState.retryRequest(replayed), nil)
+    truthy(navState.authorizeRetry(replayedStore, replayed, robotStatus()))
+    local exact = assert(navState.retryRequest(replayed))
+    equal(exact.request_id, snapshot.pending.request_id)
+    equal(exact.fingerprint, snapshot.pending.fingerprint)
+
+    assert(navState.recordResult(replayedStore, replayed, {
+      status = "timeout", code = "outcome_unknown", message = "retry reply lost"
+    }))
+    equal(navState.canRetryPending(replayed), false)
+    truthy(navState.authorizeRetry(replayedStore, replayed, robotStatus()))
+    local retired = resultResponse(replayed, "rejected", "retired_request",
+      replayed.pending.before)
+    equal(assert(navState.recordResult(replayedStore, replayed, retired)).kind,
+      "robot_rejection")
+    equal(navState.canRetryPending(replayed), false)
+    equal(navState.assessStatus(replayed, robotStatus()).action, "manual_recovery")
+
+    local failureStore = navState.memoryStore()
+    local failed = mission(failureStore)
+    intent(failureStore, failed, "turn_left")
+    assert(navState.recordResult(failureStore, failed, {
+      status = "timeout", code = "outcome_unknown", message = "lost"
+    }))
+    failureStore.fail_at = failureStore.append_count + 1
+    equal(navState.authorizeRetry(failureStore, failed, robotStatus()), nil)
+    equal(failed.journal.health, "uncertain_write")
+    equal(navState.canRetryPending(failed), false)
+  end)
+
+  test("invalid transitions are rejected before filesystem writes", function()
+    local vfs = virtualFilesystem()
+    local store = fileStore(vfs)
+    local snapshot = mission(store)
+
+    local function unchanged(callback)
+      local bytes = vfs.files["/state/nav.state"]
+      local before = navState.copy(snapshot)
+      local records = snapshot.journal.records
+      local ok, reason = callback()
+      equal(ok, nil)
+      truthy(reason)
+      equal(vfs.files["/state/nav.state"], bytes)
+      truthy(sameValue(snapshot, before))
+      equal(snapshot.journal.health, "healthy")
+      equal(snapshot.journal.records, records)
+      local replayed = reload(fileStore(vfs))
+      replayed.journal.last_persist_ms = snapshot.journal.last_persist_ms
+      truthy(sameValue(replayed, replayComparable(snapshot)))
+    end
+
+    unchanged(function() return navState.markDestination(store, snapshot) end)
+    unchanged(function()
+      return store.append(snapshot, {kind = "result", request_id = "none",
+        sequence = 1, classification = "success"})
+    end)
+    intent(store, snapshot, "turn_left")
+    unchanged(function() return navState.beginReturn(store, snapshot) end)
+    unchanged(function() return navState.terminate(store, snapshot, "aborted", "bad") end)
+    unchanged(function()
+      return store.append(snapshot, {kind = "result", request_id = "wrong",
+        sequence = 1, classification = "success"})
+    end)
+    unchanged(function()
+      return navState.prepareIntent(store, snapshot, {operation = "move_forward",
+        recipient = robotAddress, request_id = "p:" .. epoch .. ":2"})
+    end)
+    assert(navState.recordResult(store, snapshot, success(snapshot)))
+    truthy(navState.beginReturn(store, snapshot))
+    unchanged(function() return navState.beginReturn(store, snapshot) end)
+    unchanged(function()
+      return navState.prepareIntent(store, snapshot, {
+        operation = "turn_left", recipient = robotAddress})
+    end)
+    truthy(intent(store, snapshot, "turn_right"))
+  end)
+
+  test("action and journal limits reject without changing authoritative state", function()
+    local actionStore = navState.memoryStore()
+    local limited = mission(actionStore, {action_limit = 1})
+    intent(actionStore, limited, "turn_left")
+    assert(navState.recordResult(actionStore, limited, success(limited)))
+    local actionBefore = navState.copy(limited)
+    local actionRecords = actionStore.records()
+    equal(navState.prepareIntent(actionStore, limited, {
+      operation = "turn_right", recipient = robotAddress}), nil)
+    truthy(sameValue(limited, actionBefore))
+    truthy(sameValue(actionStore.records(), actionRecords))
+
+    local vfs = virtualFilesystem()
+    local boundedStore = fileStore(vfs, {max_records = 2})
+    local bounded = mission(boundedStore)
+    intent(boundedStore, bounded, "turn_left")
+    local bytes = vfs.files["/state/nav.state"]
+    local before = navState.copy(bounded)
+    equal(navState.recordResult(boundedStore, bounded, success(bounded)), nil)
+    equal(vfs.files["/state/nav.state"], bytes)
+    truthy(sameValue(bounded, before))
+    equal(bounded.journal.health, "healthy")
+    local replayed = reload(fileStore(vfs, {max_records = 2}))
+    replayed.journal.last_persist_ms = bounded.journal.last_persist_ms
+    truthy(sameValue(replayed, replayComparable(bounded)))
   end)
 
   test("transport and robot failure classes retain distinct policies", function()
