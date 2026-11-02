@@ -254,6 +254,14 @@ The deliberately small playable experiment ahead of the remaining milestone sequ
 
 The simplified prototype tills and plants each cell from one adjacent crop-height pose. Its rectangular planner traverses columns in a serpentine order, using unplanted crop spaces as its corridor and backing away from each completed cell. Host geometry checks prohibit movement into planted cells. It intentionally omits surveying, provisioning, irrigation, generalized pathfinding, autonomous recovery, and return-to-charger behavior. Its runbook is [POTATO_PATCH.md](POTATO_PATCH.md).
 
+### Interim supervised navigation baseline
+
+**Status:** Accepted for the demonstrated supervised scope on 2026-11-02. This is an enabling capability for later survey and construction milestones, not completion of the Potato Farm MVP.
+
+Wheatley completed the original flat one-block-West fixture plus three progressively more complex in-game round trips: direct vertical travel to `(0,1,0)`, a reactive one-block natural hill climb to `(-7,1,0)` West, and multi-elevation Shrubland travel to `(-15,4,-1)`. The final mission used 28 outbound physical attempts, retained 23 successful actual-route breadcrumbs, reached the requested coordinate, and returned by executing the exact inverse of those breadcrumbs. It reconciled trusted `(0,0,0)` North and archived as `navigation_complete` without manual movement.
+
+This accepts supervised horizontal/vertical coordinate travel, reactive one-block climbs, actual-route journaling, exact inverse return, final pose reconciliation, and normal mission archival. Hovering above terrain after a climb is observed and acceptable for this navigation MVP; construction still needs ground-relative support verification. Lateral detours, entity retries, changed return routes, interrupted-mission recovery, lost-reply recovery, automated energy reserve, and automated charging verification remain unaccepted. Operator-observed green charging particles after return do not satisfy `charging_verified`.
+
 ### Milestone 1: Addressed and recoverable command transport
 
 **Status:** Implemented, host-tested, deployed, and partially accepted in supervised OpenOS/Minecraft testing on 2026-10-30. Addressed status, commissioning, legacy invalidation/recovery, four physical operations, retained duplicate suppression, conflict rejection, and normal completed-state restart recovery passed. Compaction, lost reply, interrupted `prepared`/`executing`, post-restart duplicate replay, and observed stale-epoch rejection remain pending; do not treat this milestone as complete.
@@ -435,9 +443,9 @@ The simplified prototype tills and plants each cell from one adjacent crop-heigh
 
 ## Immediate Coding Milestone
 
-Milestone 1 remains partially accepted; its controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md) is deliberately deferred, not waived. The supervised single-cell, two-cell, and 3x3 reverse-serpentine runs in [POTATO_PATCH.md](POTATO_PATCH.md) have now completed successfully; use that vertical-slice evidence to select the next project gate without treating it as the autonomous Potato Farm MVP.
+Milestone 1 remains partially accepted; its controlled fault-tolerance and compaction procedure in [MILESTONE1.md](MILESTONE1.md) is deliberately deferred, not waived. The supervised Potato-patch prototype and basic 3D navigation baseline have both completed their demonstrated in-game acceptance scopes. Neither result is the autonomous Potato Farm MVP.
 
-Keep this vertical slice narrow. Do not add Geolyzer routing, RS calls, terrain planning, provisioning, or generalized construction around it. After the playable experiment, use what it reveals to choose between returning to deferred Milestone 1 acceptance and advancing the relevant hardware/interaction milestones.
+The next farm-facing gates remain the focused Milestone 2–3 hardware and interaction probes, Milestone 5 native RS/dock supply loop, and Milestone 6 read-only 9x10 survey and deterministic plan. Reuse the accepted navigation path without treating untested lateral detours, recovery faults, energy reserve, charging verification, or general terrain surveying as solved.
 
 ## Immediate In-Game Experiments
 

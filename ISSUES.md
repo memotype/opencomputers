@@ -40,21 +40,12 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Required mitigation:** Journal in-flight and completed requests on the robot, cache completed results, and enter recovery-required state after an interrupted in-flight action.
 - **Resolution criteria:** Duplicate completed requests return their original result without repeating the action; interrupted requests are not replayed automatically; and an unresolved executing retry reports unknown outcome rather than definite rejection in a supervised OpenOS test.
 
-### OCIA-004: Controller and robot do not track pose
-
-- **Status:** In progress
-- **Area:** Navigation
-- **Risk:** Construction planning cannot reliably map relative blueprint coordinates to physical robot actions.
-- **Current evidence:** Pure relative-pose logic, robot-side durable pose, and the controller navigation CLI pass host tests. On 2026-11-02 the durable `ocianav` happy path reached `(-1,0,0)` West and returned to `(0,0,0)` North in Minecraft with four matching physical operations, exact breadcrumbs, final reconciliation, `navigation_complete`, and mission archive. The repository now host-tests nonzero-Y travel, one-block climbs/descents, gradual elevation, bounded lateral detours, and exact vertical/detour inverse return. Those 3D/reactive behaviors remain undeployed and untested in Minecraft.
-- **Required mitigation:** Define a relative coordinate system and update controller and robot pose only after successful operations.
-- **Resolution criteria:** Movement and turn tests produce matching controller and robot poses, including partial-operation failures.
-
 ### OCIA-005: Deployment progress is not durable
 
 - **Status:** In progress
 - **Area:** Persistence
 - **Risk:** A program, computer, game, or host restart can lose the authoritative step and cause repeated or skipped construction.
-- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Navigation connects the separate controller journal to the CLI and existing transport with intent-before-send ordering, post-confirmation status revalidation, exact pending-request replay, actual breadcrumbs, frozen return progress, terminal archive rotation, and fail-closed injected persistence handling. Definite local non-send is durably cleared without consuming sequence or changing pose; every possibly delivered outcome remains pending. Deployment fixtures preserve and prohibit manifest installation of `/var/lib/ocia/nav.state` and its archives. The 2026-11-02 supervised flat mission completed and archived successfully in OpenOS/Minecraft. Controller restart recovery, interrupted records, archive fault behavior, cross-disk crash windows, partial writes, and sudden power loss remain untested live.
+- **Current evidence:** Robot request phase, pose, epoch, high water, and recent results use a checksummed append-only journal. Navigation connects the separate controller journal to the CLI and existing transport with intent-before-send ordering, post-confirmation status revalidation, exact pending-request replay, actual breadcrumbs, frozen return progress, terminal archive rotation, and fail-closed injected persistence handling. Definite local non-send is durably cleared without consuming sequence or changing pose; every possibly delivered outcome remains pending. Deployment fixtures preserve and prohibit manifest installation of `/var/lib/ocia/nav.state` and its archives. Four supervised navigation missions completed normal outbound, return, reconciliation, terminal, and archive lifecycles in Minecraft on 2026-11-02, including a 51-attempt multi-elevation mission. Controller restart recovery, lost replies, interrupted records, archive fault behavior, cross-disk crash windows, partial writes, and sudden power loss remain untested live.
 - **Required mitigation:** Persist versioned controller deployment state and robot execution state using replace-safe writes.
 - **Resolution criteria:** Restart tests either resume from an unambiguous checkpoint or stop with an explicit recovery requirement.
 
@@ -135,7 +126,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Power management
 - **Risk:** A deployment may begin with insufficient energy and stop away from its recovery location.
-- **Current evidence:** Energy is reported and the 3D departure preview now exposes it, but it is not used as an execution precondition. The installed Tier 2 Battery reports a `35500`-unit capacity. Wheatley exhausted his battery away from home during an earlier farming run and required physical relocation to the Charger before the 2026-11-02 navigation acceptance, demonstrating that this risk is real. The later four-operation navigation fixture finished at `35497/35500`. Prior charging particles and an observed increase from `35196` to `35499` remain useful short-session evidence, not a characterized operation budget or reserve policy.
+- **Current evidence:** Energy is reported and the 3D departure preview exposes it, but it is not used as an execution precondition. The installed Tier 2 Battery reports a `35500`-unit capacity. Wheatley previously exhausted his battery away from home and required physical relocation, demonstrating that this risk is real. During the accepted `(-15,4,-1)` expedition, destination status reported `34227/35500`, and Wheatley completed the 23-action inverse return without intervention. This is useful supervised-trip evidence, not a characterized operation budget or reserve policy.
 - **Required mitigation:** Measure idle, movement, analyze, scan, excavation, and return energy costs; establish conservative preflight and reserve thresholds; and enter recovery before the reserve is exhausted. Charging-station verification is tracked by OCIA-035.
 - **Resolution criteria:** The Battery's observed buffer is recorded, deployment is refused below the configured reserve, tested plans account for return energy, and low-energy execution stops while Wheatley can still reach or be recovered at the station.
 
@@ -297,7 +288,7 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Status:** Open
 - **Area:** Charging and recovery
 - **Risk:** The robot may reach the nominal station while misaligned, unpowered, or beside a Charger whose required redstone activation is disabled, then falsely report a successful return.
-- **Current evidence:** The conduit-powered Charger directly north of Wheatley's origin requires its Lever. Operator-issued autonomous one-step commands returned Wheatley from `(-1,0,0)` West to `(0,0,0)` North. Green particles appeared and reported energy rose by 303 units near the dock. This supports physical charging at the known pose, but no automatic return decision, route planning, alignment detection, controlled charge interval, lever-off/misalignment controls, full-buffer handling, waiting, or resume was tested.
+- **Current evidence:** The conduit-powered Charger directly north of Wheatley's origin requires its Lever. Four supervised navigation missions returned Wheatley to trusted `(0,0,0)` North, including exact inverse returns from `(-7,1,0)` and `(-15,4,-1)`. The operator visually observed green charging particles after the hill and hillside returns. Earlier reported energy also rose by 303 units near the dock. This confirms commissioned-pose return and operator-observed charging behavior, but `charging_verified` correctly remains false: no automated alignment detection, bounded energy-rise observation, lever-off/misalignment controls, full-buffer handling, waiting, or resume was tested.
 - **Required mitigation:** Define a charging pose, verify alignment, sample energy over a bounded interval, handle a full battery separately, require a validated positive charging signal, and stop with a diagnostic when power or redstone is absent.
 - **Resolution criteria:** Tests with Lever on, Lever off, incorrect alignment, active charging, and an already-full buffer distinguish successful charging from mere arrival; interrupted work resumes only from a durable safe state.
 
@@ -311,6 +302,13 @@ This file tracks known defects, design risks, and unresolved operating constrain
 - **Resolution criteria:** An in-game test demonstrates bounded storage across compaction, retained duplicates remain suppressed, retired active-epoch sequences cannot execute, a new epoch is created only through explicit origin recovery, and prior-epoch packets are rejected within measured memory/disk limits.
 
 ## Resolved Issues
+
+### OCIA-004: Controller and robot do not track pose
+
+- **Status:** Mitigated
+- **Area:** Navigation
+- **Original risk:** Construction planning could not reliably map relative blueprint coordinates to physical robot actions.
+- **Disposition:** Pure relative-pose logic, robot-side durable pose, and the controller navigation CLI pass host tests. User-observed Minecraft acceptance on 2026-11-02 covers four supervised round trips: the flat `(-1,0,0)` fixture, direct vertical `(0,1,0)`, a reactive natural hill climb to `(-7,1,0)` West, and a multi-elevation expedition to `(-15,4,-1)`. The final expedition used 28 outbound physical attempts, recorded 23 successful actual-route breadcrumbs, reached high water `53`, and inverted all 23 breadcrumbs to return to trusted `(0,0,0)` North at high water `76` without manual movement. Every mission reconciled and archived as `navigation_complete`. Basic supervised coordinate/pose tracking therefore meets the mitigation criterion. Construction-specific ground-relative verification and the unaccepted lateral-detour, entity-retry, changed-return-route, and interrupted-mission cases remain explicit limitations and separate acceptance gates in `SCRATCH.md` and `MVP_PLAN.md`.
 
 ### OCIA-017: Refined Storage completion can be acknowledged falsely
 

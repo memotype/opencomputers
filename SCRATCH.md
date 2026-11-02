@@ -12,10 +12,10 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Wireless port: `4242`
 - Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Core supervised transport, movement, duplicate/conflict handling, commissioning, and normal restart tests passed on 2026-10-30; compaction and fault-injection acceptance remain pending, so Milestone 1 is partially accepted rather than complete.
 - The remaining Milestone 1 compaction and fault-injection acceptance is deliberately deferred while the project prioritizes a supervised, playable construction vertical slice: Wheatley's first 3x3 Potato patch. Milestone 1 is not complete.
-- Navigation MVP Stages 1 through 3 are implemented and host-validated. `lib/ocia/nav.lua` provides pure minimum-cost nominal routes; `lib/ocia/nav_state.lua` provides the durable controller mission lifecycle; and `home/ocianav.lua` integrates `plan`, `go`, `status`, `return`, and `resume` with the existing transport and robot executor. The first supervised flat Stage 3 round trip passed in Minecraft on 2026-11-02. A repository-only extension now permits vertical movement and bounded reactive local traversal; it has not been deployed or accepted in Minecraft.
+- Navigation MVP Stages 1 through basic supervised 3D traversal are implemented, host-validated, deployed, and accepted for the demonstrated scope. On 2026-11-02 Wheatley completed the flat Stage 3 fixture, a direct vertical round trip, a reactive natural one-block hill climb, and a multi-elevation expedition to `(-15,4,-1)`, returning through exact actual-action breadcrumbs each time. Crash recovery, lateral detours, entity retries, changed return routes, energy reserve, and automated charging verification remain unaccepted in Minecraft.
 - `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. The proposed manifest is now 14 controller files and 11 robot files, including one generated `/etc/ocia.cfg` per role; controller navigation journals and archives remain excluded.
 - `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save, two HDD UUIDs, and two confirmed modem UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
-- The Stage 3 controller navigation implementation was installed for the successful supervised 2026-11-02 acceptance run. The newer basic-3D source and `nav_probe` protocol/robot changes exist only in the repository and have not been deployed to either live HDD.
+- The basic-3D controller, `nav_probe` protocol, and robot changes were installed for the successful supervised 2026-11-02 acceptance runs. This documentation update does not change either live HDD or any runtime journal.
 - The 21-entry one-pass Potato prototype demonstrated adjacent journaled till-and-plant behavior in the single-cell and two-cell stages. Two full 3x3 attempts then stopped safely on Dirt outside the plot, exposing the old perimeter route's excessive clearance requirement. Its parameterized reverse-serpentine replacement was deployed and completed the supervised 3x3 patch successfully in game. [POTATO_PATCH.md](POTATO_PATCH.md) is the operator runbook.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
@@ -1293,7 +1293,49 @@ Host validation after implementation:
 | all repository Lua files through `luac5.3 -p` | passed |
 | `git diff --check` | clean |
 
-Material limitations remain intentionally small: no terrain map or general path search; at most one-block reactive climbs; short lateral detours; two entity retries; no excavation, placement, or mob attacks; no automatic return replanning around a new solid obstacle; no measured energy reserve; and no charging verification. Forward travel remains optimistic, while downward movement and reactive detours refuse detected liquid or unknown adjacent terrain. `detectDown()` describes only the cell immediately below Wheatley; it does not prove that a horizontal destination has supporting ground, establish the depth of a drop, or make a route-level ground-support guarantee. Initial Minecraft tests must be short, supervised, and begin with disposable one-step fixtures before the proposed `(-15,+4,-1)` trip.
+Material limitations remain intentionally small: no terrain map or general path search; at most one-block reactive climbs; short lateral detours; two entity retries; no excavation, placement, or mob attacks; no automatic return replanning around a new solid obstacle; no measured energy reserve; and no charging verification. Forward travel remains optimistic, while downward movement and reactive detours refuse detected liquid or unknown adjacent terrain. `detectDown()` describes only the cell immediately below Wheatley; it does not prove that a horizontal destination has supporting ground, establish the depth of a drop, or make a route-level ground-support guarantee. These limitations remain in force after the supervised acceptance recorded below.
+
+### Supervised 3D Navigation Minecraft Acceptance: 2026-11-02
+
+**Demonstrated-scope verdict: PASSED.** These are user-reported observations from the actual Minecraft world, supported by controller/robot status output, screenshots, and visual inspection. They establish successful supervised execution and reconciliation, not independent instrumented proof of crash or fault recovery. The environment was The 1.12.2 Pack v1.6.6 with OpenComputers 1.8.8. All three missions used execution epoch `27939d2b-7c4e-4a5c-8f7b-18f12339a96c` and began from commissioned `(0,0,0)` North with ready mode, trusted pose, and healthy journals.
+
+#### Test 1: direct vertical movement and return
+
+- Mission: `2685ec73-ef29-40a8-8a1a-fa5195243580`.
+- Starting high water: `4`; battery nearly full.
+- `ocianav plan --x 0 --y 1 --z 0` purely previewed one `move_up`; `go`, `status`, `return`, and final `status` then exercised the mission.
+- Request 5 moved Wheatley from `(0,0,0)` North to `(0,1,0)` North. The operator visually confirmed the one-block ascent; controller status reported `at_destination`, one breadcrumb, trusted pose, healthy journal, and high water `5`.
+- Request 6 executed `move_down` and returned Wheatley to `(0,0,0)` North. The mission recorded `navigation_complete` and archived successfully. `charging_verified=false` remained correct.
+
+**Verdict: PASSED.** This accepts direct vertical pose tracking, breadcrumb recording, inverse descent, final reconciliation, and archival for the supervised fixture.
+
+#### Test 2: reactive natural one-block hill climb and return
+
+- Mission: `84e63e73-c7ba-4f6f-8a04-af8d80cfbdeb`.
+- Starting high water: `6`; requested destination `(-7,1,0)` West; battery nearly full. A natural one-block rise was seven blocks west of home.
+- Wheatley turned West and traveled until one forward request failed definitively against solid terrain. The controller selected the one-block climb behavior. Request 15 moved up from `(-6,0,0)` West to `(-6,1,0)` West; request 16 moved forward to `(-7,1,0)` West. The operator visually confirmed Wheatley on the raised grass terrain.
+- Outbound used 10 physical attempts, produced nine successful breadcrumbs and one failed attempt, and ended at high water `16` with both journals healthy.
+- `ocianav return` executed the inverse of those nine breadcrumbs with requests 17 through 25 and no reported return failure. Wheatley reached `(0,0,0)` North without manual movement. Final high water was `25`; the mission used 19 total physical attempts, recorded `navigation_complete`, and archived. Final status showed no active mission and three archived navigation missions. The operator observed Wheatley at the Charger with green particles.
+
+**Verdict: PASSED.** This accepts supervised solid-obstruction recognition, one-block climb selection, durable actual-route recording, exact inverse return, reconciliation, and archival for ordinary natural terrain.
+
+#### Test 3: multi-elevation hillside expedition and return
+
+- Mission: `9e2eb39e-6b6a-4507-a573-f73a6a65d387`.
+- Starting high water: `25`; requested destination `(-15,4,-1)` in natural Shrubland terrain containing multiple one-block rises.
+- Wheatley traversed the uneven route, reacted to multiple solid obstructions, and performed successive one-block climbs. The final climb used request 52 for `move_up` from `(-14,3,-1)` West to `(-14,4,-1)` West, followed by request 53 for `move_forward` to `(-15,4,-1)` West. The operator visually confirmed arrival.
+- Outbound used 28 physical attempts and recorded 23 successful breadcrumbs; five attempts did not produce successful movement breadcrumbs. It ended at high water `53`, energy `34227/35500`, phase `at_destination`, ready robot mode, healthy controller and robot journals, and no reconciliation requirement.
+- `ocianav return` executed the exact inverse of all 23 successful breadcrumbs. The operator observed elevated horizontal travel and descents reproducing the outbound path in reverse. Request 75 turned right at `(0,1,0)` from West to North; request 76 moved down to `(0,0,0)` North. No manual intervention was required. Final high water was `76`; the mission used 51 total physical attempts, recorded `navigation_complete`, and archived successfully. The operator again observed Wheatley at the Charger with green particles.
+
+**Verdict: PASSED.** This accepts the complete supervised navigation lifecycle over the demonstrated multi-elevation natural route: reactive climbs, durable actual-route breadcrumbs, exact inverse return, final pose reconciliation, and archival.
+
+#### Accepted behavior and remaining boundaries
+
+Wheatley visibly hovered above portions of the terrain after climbing and reproduced those elevated segments on return. Continuous ground-following is not part of the current navigation MVP; this hovering is accepted for supervised coordinate travel and is not an immediate defect. Farming and construction still require explicit ground-relative positioning and support evidence.
+
+The three missions confirm return to commissioned `(0,0,0)` North. Green charging particles are operator-observed evidence that the active Charger was charging Wheatley after return. They do not set or replace automated `charging_verified`, which remains unimplemented and false.
+
+These runs demonstrated normal request sequencing, controller journaling, status reconciliation, actual-breadcrumb inversion, and mission archival. They did not test crash or power-loss durability, lost replies, interrupted active operations, lateral detours, temporary-entity retries, a newly blocked return route, automated energy reserve, automated charging verification, general pathfinding, or terrain surveying. Those remain separate acceptance gates and are not blockers for the supervised behavior accepted here.
 
 ### Purpose, operating envelope, and non-goals
 
@@ -1592,9 +1634,9 @@ If this design is accepted, `MVP_PLAN.md` should gain a navigation milestone bef
 
 ## Immediate Next Work
 
-Independently review the basic 3D navigation and `nav_probe` diff plus its host evidence. Confirm that every reactive movement still uses the existing intent/result journal, definite failed movements consume and reconcile their request sequence, ambiguous requests retain exact-ID recovery, vertical and detour successes enter the ordinary breadcrumb stack, and return inverts that frozen actual history. Confirm the read-only probe does not consume robot high water or journal records and that manual drive/farming paths remain unchanged.
+Treat direct vertical travel, reactive one-block climbs, multi-elevation supervised coordinate travel, actual-breadcrumb inverse return, final pose reconciliation, and normal mission archival as the accepted navigation baseline. Preserve hovering as an acceptable coordinate-navigation behavior while keeping ground-relative positioning explicit for construction. Do not broaden this acceptance to lateral detours, entity retries, changed return routes, interrupted missions, energy reserve, charging verification, general pathfinding, or terrain surveying.
 
-After review and a separate deployment authorization, begin supervised Minecraft acceptance with one direct `move_up`/inverse return fixture and one single-block climb fixture near home. Then test one ordinary descent, one disposable lateral obstruction, and one temporary-entity stop/retry if practical. Inspect status and journal evidence after each fixture. Only after those pass should the operator preview and attempt the proposed coordinate trip to `(-15,+4,-1)` from a nearly full battery. Keep return confirmed and supervised; stop on any liquid, unknown classification, new solid return obstruction, low-energy concern, or controller/robot inconsistency. The new 3D capability is host-only until those fixtures pass, and `charging_verified` remains false.
+With the basic travel path demonstrated, return project emphasis to the Potato Farm MVP dependencies: Inventory Controller/tool handling, verified one-block world interactions, native RS supply/return experiments, and the read-only survey/plan milestone. Navigation fault-injection and Milestone 1 durability work remain visible deferred gates rather than prerequisites silently assumed complete.
 
 The deferred Milestone 1 acceptance queue remains:
 
