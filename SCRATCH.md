@@ -12,10 +12,10 @@ The evergreen project purpose, architecture, and engineering constraints are def
 - Wireless port: `4242`
 - Milestone 1 command transport, relative-pose math, append-only robot execution journaling, bounded result retention, and journal compaction are implemented, host-tested, and installed on the live HDDs. Core supervised transport, movement, duplicate/conflict handling, commissioning, and normal restart tests passed on 2026-10-30; compaction and fault-injection acceptance remain pending, so Milestone 1 is partially accepted rather than complete.
 - The remaining Milestone 1 compaction and fault-injection acceptance is deliberately deferred while the project prioritizes a supervised, playable construction vertical slice: Wheatley's first 3x3 Potato patch. Milestone 1 is not complete.
-- Navigation MVP Stages 1 through 3 are implemented and host-validated. `lib/ocia/nav.lua` provides pure minimum-cost nominal routes; `lib/ocia/nav_state.lua` provides the durable controller mission lifecycle; and `home/ocianav.lua` now integrates supervised flat `plan`, `go`, `status`, `return`, and `resume` commands with the existing transport and robot executor. Stage 3 has not been independently code-reviewed, deployed, or accepted in Minecraft.
+- Navigation MVP Stages 1 through 3 are implemented and host-validated. `lib/ocia/nav.lua` provides pure minimum-cost nominal routes; `lib/ocia/nav_state.lua` provides the durable controller mission lifecycle; and `home/ocianav.lua` integrates `plan`, `go`, `status`, `return`, and `resume` with the existing transport and robot executor. The first supervised flat Stage 3 round trip passed in Minecraft on 2026-11-02. A repository-only extension now permits vertical movement and bounded reactive local traversal; it has not been deployed or accepted in Minecraft.
 - `deploy.lua` provides explicit allowlist deployment to controller, robot, or both. It defaults to dry run, compares bytes, backs up replaced files under `.deploy-backups/`, stages same-directory replacements, and verifies installed bytes. The proposed manifest is now 14 controller files and 11 robot files, including one generated `/etc/ocia.cfg` per role; controller navigation journals and archives remain excluded.
 - `deploy.local.lua` is the ignored, authoritative local mapping from logical roles to one world save, two HDD UUIDs, and two confirmed modem UUIDs. The committed `deploy.local.lua.example` contains placeholders only.
-- The pre-Stage-3 manifest remains installed in the live world. Both generated `/etc/ocia.cfg` files loaded successfully in OpenOS. Stage 3's controller additions and ownership changes are present only in the repository; the current dry run reports their expected controller creates/updates and every robot file unchanged.
+- The Stage 3 controller navigation implementation was installed for the successful supervised 2026-11-02 acceptance run. The newer basic-3D source and `nav_probe` protocol/robot changes exist only in the repository and have not been deployed to either live HDD.
 - The 21-entry one-pass Potato prototype demonstrated adjacent journaled till-and-plant behavior in the single-cell and two-cell stages. Two full 3x3 attempts then stopped safely on Dirt outside the plot, exposing the old perimeter route's excessive clearance requirement. Its parameterized reverse-serpentine replacement was deployed and completed the supervised 3x3 patch successfully in game. [POTATO_PATCH.md](POTATO_PATCH.md) is the operator runbook.
 - Wheatley has demonstrated adjacent block analysis and three-dimensional Geolyzer scans, but no autonomous survey route or coordinate mapper exists yet.
 - The factory already has a Forestry Multifarm producing apples.
@@ -1254,6 +1254,45 @@ Final host results are Stage 1 `12 / 4,785`, Stage 2 `28 / 710`, Stage 3 `31 / 3
 
 The remaining gates are operational rather than code-design work: independent confirmation of this final regression, separately authorized controller-only deployment, OpenOS ownership/cleanup observation, and the supervised one-block-West round trip. No host result is Minecraft acceptance, and no deployment, commit, push, journal mutation, epoch change, or physical movement occurred in this pass.
 
+### Stage 3 Supervised Minecraft Acceptance: 2026-11-02
+
+**Happy-path verdict: PASSED.** This acceptance is deliberately narrow. It establishes the first supervised flat outbound/inverse-return lifecycle in Minecraft; it does not accept restart recovery, fault injection, generalized navigation, or automatic charging verification.
+
+After an earlier farming run exhausted Wheatley's battery away from home, the operator physically returned him to the charging station and recommissioned `(0,0,0)` North with `ocia-recover.lua reset-origin`. The new execution epoch was `27939d2b-7c4e-4a5c-8f7b-18f12339a96c`.
+
+The controller ran `ocianav plan --x -1 --y 0 --z 0 --heading west`, `go` with the same destination, `status`, `return`, and a final `status`; the operator supplied the literal `NAVIGATE` and `RETURN` confirmations. Mission `ac25ed48-8795-47f7-b87c-63e64d7917d1` executed these physical requests:
+
+| Sequence | Operation | Result |
+|---:|---|---|
+| 1 | `turn_left` | Success |
+| 2 | `move_forward` | Success |
+| 3 | `move_backward` | Success |
+| 4 | `turn_right` | Success |
+
+Wheatley visibly reached `(-1,0,0)` West and returned to `(0,0,0)` North. The controller recorded the actual outbound breadcrumbs, executed their exact inverse, reconciled the final pose, recorded `navigation_complete`, and archived the mission. Independent final status reported robot mode `ready`, robot journal `healthy`, trusted `(0,0,0)` North, physical high water `4`, no active controller mission, one archived mission, and energy `35497/35500`. `charging_verified=false` was correct: the test observed arrival, not automated charging proof.
+
+### Basic 3D Navigation Implementation Result: 2026-11-02
+
+**Repository status: implemented and host-validated; pending independent review and supervised Minecraft fixtures.** No live HDD, Minecraft world, execution epoch, or runtime journal was changed during this implementation.
+
+The existing controller journal, physical request sequencing, status reconciliation, and actual-action breadcrumbs remain authoritative. `ocianav go` now accepts nonzero Y, executes `move_up` and locally checked `move_down`, and replans from the durable actual pose after every successful action or reactive maneuver. A definite horizontal movement failure can trigger one adjacent categorical `nav_probe`, a one-block climb, or a small left/right lateral detour. Entity failures wait briefly and retry at most twice using new journaled physical request IDs. Every definite failed attempt consumes its sequence and reconciles fresh robot status before another physical request. Ambiguous outcomes retain the exact pending identity and stop under the existing recovery contract.
+
+`nav_probe` is a correlated `s:` request that wraps only classic `robot.detect()`, `detectUp()`, and `detectDown()`. It reports broad adjacent categories and does not change robot pose, high water, recent physical results, or the physical journal. Direct inspection of the installed OpenComputers `1.8.8+8da357f` JAR confirmed those methods and the `air`, `entity`, `replaceable`, `passable`, `solid`, and `liquid` categories used by the implementation.
+
+Return still freezes and reverses only confirmed successful outbound breadcrumbs. Vertical actions and detour turns/movements therefore return through the same existing inverse mechanism. Return retries a temporary entity obstruction twice with new request IDs, but a new solid obstruction stops for operator intervention.
+
+Host validation after implementation:
+
+| Gate | Result |
+|---|---|
+| `lua5.3 tests/nav_cli_test.lua` | 39 tests, 333 assertions, 0 failures |
+| `lua5.3 tests/run.lua` | 120 tests, 13,941 assertions, 0 failures |
+| `lua5.3 tests/deploy_test.lua` | 26 tests, 173 assertions, 0 failures |
+| all repository Lua files through `luac5.3 -p` | passed |
+| `git diff --check` | clean |
+
+Material limitations remain intentionally small: no terrain map or general path search; at most one-block reactive climbs; short lateral detours; two entity retries; no excavation, placement, or mob attacks; no automatic return replanning around a new solid obstacle; no measured energy reserve; and no charging verification. Forward travel remains optimistic, while downward movement and reactive detours refuse detected liquid or unknown adjacent terrain. Initial Minecraft tests must be short, supervised, and begin with disposable one-step fixtures before the proposed `(-15,+4,-1)` trip.
+
 ### Purpose, operating envelope, and non-goals
 
 The first navigation target is short, supervised travel through mostly open Shrubland: modest hills, grass and shrubs, isolated trees, shallow depressions, and occasional structures. Wheatley should leave the commissioned home pose, reach a coordinate in the commissioned-origin frame, negotiate an ordinary small obstruction when possible, retain the actual route he traveled, and return to `(0,0,0)` facing North.
@@ -1551,7 +1590,9 @@ If this design is accepted, `MVP_PLAN.md` should gain a navigation milestone bef
 
 ## Immediate Next Work
 
-Independently review the completed **Stage 3 independent-review hardening diff and host evidence** recorded in the Navigation MVP section. Verify especially that incompatible pending/history operations stop before retry authorization, initial return budgets actual breadcrumbs before `return_start`, every `resume` phase previews its complete possible work before confirmation, and post-confirmation status cannot silently change that preview. Reconfirm the previously accepted post-`NAVIGATE` check, definite-local-nonsend transition, exact-ID retry, actual-breadcrumb return, cooperative ownership cleanup, and protected deployment targets remain intact. Stage 3 is host-complete but not authorized for deployment. If review accepts it, the next separate GO should authorize only the dry-run-listed controller deployment, followed by the documented supervised one-block-West fixture. Do not begin Stage 4/5 work or describe host results as Minecraft acceptance.
+Independently review the basic 3D navigation and `nav_probe` diff plus its host evidence. Confirm that every reactive movement still uses the existing intent/result journal, definite failed movements consume and reconcile their request sequence, ambiguous requests retain exact-ID recovery, vertical and detour successes enter the ordinary breadcrumb stack, and return inverts that frozen actual history. Confirm the read-only probe does not consume robot high water or journal records and that manual drive/farming paths remain unchanged.
+
+After review and a separate deployment authorization, begin supervised Minecraft acceptance with one direct `move_up`/inverse return fixture and one single-block climb fixture near home. Then test one ordinary descent, one disposable lateral obstruction, and one temporary-entity stop/retry if practical. Inspect status and journal evidence after each fixture. Only after those pass should the operator preview and attempt the proposed coordinate trip to `(-15,+4,-1)` from a nearly full battery. Keep return confirmed and supervised; stop on any liquid, unknown classification, new solid return obstruction, low-energy concern, or controller/robot inconsistency. The new 3D capability is host-only until those fixtures pass, and `charging_verified` remains false.
 
 The deferred Milestone 1 acceptance queue remains:
 

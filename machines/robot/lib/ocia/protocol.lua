@@ -8,6 +8,7 @@ protocol.NO_DEPLOYMENT = "-"
 
 protocol.operations = {
   status = {physical = false},
+  nav_probe = {physical = false},
   turn_left = {physical = true},
   turn_right = {physical = true},
   move_forward = {physical = true},
@@ -180,9 +181,9 @@ function protocol.validStatusRequestId(requestId)
 end
 
 local function validateRequestIdentity(requestId, operation)
-  if operation == "status" then
+  if protocol.operations[operation] and not protocol.operations[operation].physical then
     if not protocol.validStatusRequestId(requestId) then
-      return nil, "status request ID must use the s: namespace"
+      return nil, "nonphysical request ID must use the s: namespace"
     end
   else
     local parsed, reason = protocol.parsePhysicalRequestId(requestId)

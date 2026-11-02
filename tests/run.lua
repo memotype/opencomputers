@@ -61,7 +61,8 @@ require("tests.nav_cli_cases").register({
 
 local statusCounter = 0
 local function request(id, operation, deployment, arguments)
-  if operation == "status" and not id then
+  if protocol.operations[operation] and not protocol.operations[operation].physical
+      and not id then
     statusCounter = statusCounter + 1
     id = "s:test-" .. statusCounter
   end
@@ -106,6 +107,11 @@ local function makeExecutor(store, options)
     status_provider = function()
       return {energy = 100, capacity = 200, total_memory = 786432,
         free_memory = 524288}
+    end,
+    probe_provider = options.probe_provider or function()
+      return {front_blocked = true, front_kind = "solid",
+        up_blocked = false, up_kind = "air",
+        down_blocked = false, down_kind = "air"}
     end
   })
   return instance, function() return calls end
@@ -224,6 +230,7 @@ end
 
 test("protocol enforces status and physical request namespaces", function()
   truthy(request(nil, "status"))
+  truthy(request(nil, "nav_probe"))
   truthy(physical(1, "move_forward"))
   local parts, reason = protocol.buildRequest({request_id = "ordinary-id",
     deployment_id = "-", recipient = robotAddress, operation = "status"})
@@ -388,6 +395,23 @@ test("one thousand status requests do not write or consume physical retention", 
   equal(after.journal.bytes, before.journal.bytes)
   equal(calls(), 0)
   equal(instance:handle(physical(1)).outcome, "succeeded")
+end)
+
+test("navigation probe is correlated read-only and does not consume physical state", function()
+  local store = commissionedMemory({recent_limit = 4})
+  local instance, calls = makeExecutor(store, {recent_limit = 4})
+  local before = store.peek()
+  local reply = instance:handle(request(nil, "nav_probe"))
+  equal(reply.outcome, "succeeded")
+  equal(reply.payload.code, "nav_probe")
+  equal(reply.payload.front_blocked, true)
+  equal(reply.payload.front_kind, "solid")
+  local after = store.peek()
+  equal(after.high_water, before.high_water)
+  equal(after.journal.records, before.journal.records)
+  equal(after.journal.bytes, before.journal.bytes)
+  equal(#after.recent, 0)
+  equal(calls(), 0)
 end)
 
 test("status remains available while journal is recovery-required", function()
@@ -841,6 +865,9 @@ test("transport correlates status and reports timeout as unknown", function()
     request_id = function() return "active" end
   })
   equal(client:sendRequest("status").certainty, "succeeded")
+
+  local probeRequest = assert(client:makeRequest("nav_probe"))
+  truthy(probeRequest.request_id:match("^s:"))
 
   local timeoutClient = transport.new({
     modem = {send = function() return true end}, event = eventQueue({}),

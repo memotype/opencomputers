@@ -54,6 +54,20 @@ local commandExecutor = executorModule.new({
       total_memory = computer.totalMemory(),
       free_memory = computer.freeMemory()
     }
+  end,
+  probe_provider = function()
+    local fields = {}
+    for _, item in ipairs({
+      {name = "front", call = robot.detect},
+      {name = "up", call = robot.detectUp},
+      {name = "down", call = robot.detectDown}
+    }) do
+      local ok, blocked, kind = pcall(item.call)
+      if not ok then return nil, item.name .. " probe raised: " .. tostring(blocked) end
+      fields[item.name .. "_blocked"] = blocked and true or false
+      fields[item.name .. "_kind"] = tostring(kind or "unknown")
+    end
+    return fields
   end
 })
 

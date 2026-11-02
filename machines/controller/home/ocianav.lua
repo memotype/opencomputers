@@ -1,15 +1,23 @@
--- Navigation MVP Stage 3: supervised flat travel and exact breadcrumb return.
+-- Supervised coordinate navigation with reactive local 3D traversal and exact return.
 local nav = require("ocia.nav")
 local pose = require("ocia.pose")
 
 local cli = {}
 local JOURNAL_PATH = "/var/lib/ocia/nav.state"
 local ACTION_LIMIT = 160
+local ENTITY_RETRIES = 2
+local REACTIVE_INCIDENT_LIMIT = 12
 local liveCommands = {go = true, status = true, ["return"] = true, resume = true}
 local headings = {north = true, east = true, south = true, west = true}
-local flatOperations = {
+local movementOperations = {
   turn_left = true, turn_right = true,
-  move_forward = true, move_backward = true
+  move_forward = true, move_backward = true,
+  move_up = true, move_down = true
+}
+local horizontalOperations = {move_forward = true, move_backward = true}
+local probeKinds = {
+  air = true, entity = true, replaceable = true,
+  passable = true, solid = true, liquid = true
 }
 
 local function write(dependencies, line)
@@ -25,7 +33,7 @@ end
 local function usage(dependencies)
   writeError(dependencies, "Usage:")
   writeError(dependencies, "  ocianav plan --x X --y Y --z Z [--heading HEADING]")
-  writeError(dependencies, "  ocianav go --x X --y 0 --z Z [--heading HEADING]")
+  writeError(dependencies, "  ocianav go --x X --y Y --z Z [--heading HEADING]")
   writeError(dependencies, "  ocianav status")
   writeError(dependencies, "  ocianav return")
   writeError(dependencies, "  ocianav resume")
@@ -143,7 +151,8 @@ local function defaultContext(label)
     local client = transportModule.new({modem = modem, event = event,
       computer = computer, config = config, request_id = uuid.next})
     local context = {config = config, client = client, navState = navState,
-      store = navState.journalStore(JOURNAL_PATH), missionId = uuid.next}
+      store = navState.journalStore(JOURNAL_PATH), missionId = uuid.next,
+      sleep = os.sleep or function(seconds) computer.pullSignal(seconds) end}
     function context.archives()
       local result = {}
       local directory = filesystem.path(JOURNAL_PATH)
@@ -263,44 +272,40 @@ local function loadMission(context)
   return context.store.load()
 end
 
-local function validFlatPlan(plan)
+local function validMovementPlan(plan)
   for _, operation in ipairs(plan.operations) do
-    if not flatOperations[operation] then return nil, "Stage 3 physical routes must remain flat" end
+    if not movementOperations[operation] then
+      return nil, "navigation route contains an unsupported physical operation"
+    end
   end
   return true
 end
 
-local function validateStage3Mission(snapshot)
-  if snapshot.pose.y ~= 0 or snapshot.destination.y ~= 0 then
-    return nil, "Stage 3 cannot execute a mission whose pose or destination is outside y=0; supervised manual recovery or a later navigation stage is required"
-  end
+local function validateNavigationMission(snapshot)
   if snapshot.pending then
-    if not flatOperations[snapshot.pending.operation]
-        or snapshot.pending.before.y ~= 0 or snapshot.pending.expected.y ~= 0 then
-      return nil, "Stage 3 cannot resume pending operation "
+    if not movementOperations[snapshot.pending.operation] then
+      return nil, "navigation cannot resume pending operation "
         .. tostring(snapshot.pending.operation)
-        .. "; supervised manual recovery or a later navigation stage is required"
+        .. "; supervised manual recovery is required"
     end
   end
   for _, entry in ipairs(snapshot.breadcrumbs) do
-    if not flatOperations[entry.operation]
-        or entry.before.y ~= 0 or entry.after.y ~= 0 then
-      return nil, "Stage 3 cannot resume incompatible outbound breadcrumb "
+    if not movementOperations[entry.operation] then
+      return nil, "navigation cannot resume incompatible outbound breadcrumb "
         .. tostring(entry.operation)
-        .. "; supervised manual recovery or a later navigation stage is required"
+        .. "; supervised manual recovery is required"
     end
   end
   for _, entry in ipairs(snapshot.return_state.steps) do
-    if not flatOperations[entry.operation]
-        or entry.before.y ~= 0 or entry.after.y ~= 0 then
-      return nil, "Stage 3 cannot resume incompatible return history; supervised manual recovery or a later navigation stage is required"
+    if not movementOperations[entry.operation] then
+      return nil, "navigation cannot resume incompatible return history; supervised manual recovery is required"
     end
   end
   if snapshot.return_state.frozen then
     for index = snapshot.return_state.cursor, 1, -1 do
       local operation = assert(nav.inverse({snapshot.breadcrumbs[index].operation}))[1]
-      if not flatOperations[operation] then
-        return nil, "Stage 3 cannot resume a non-flat frozen return; supervised manual recovery or a later navigation stage is required"
+      if not movementOperations[operation] then
+        return nil, "navigation cannot resume an incompatible frozen return; supervised manual recovery is required"
       end
     end
   end
@@ -384,7 +389,7 @@ local function recordAndReport(context, snapshot, response, dependencies)
       return nil, classification.kind .. "; " .. tostring(reconcileReason)
     end
   end
-  return nil, "physical execution stopped after " .. classification.kind
+  return nil, "physical execution stopped after " .. classification.kind, classification
 end
 
 local function executeOperation(context, snapshot, operation, dependencies)
@@ -423,6 +428,155 @@ local function executeOperations(context, snapshot, operations, dependencies)
   return true
 end
 
+local function probeResponse(context)
+  local response = context.client:sendRequest("nav_probe")
+  if type(response) ~= "table" or response.certainty ~= "succeeded"
+      or response.status ~= "succeeded" or response.code ~= "nav_probe"
+      or type(response.payload) ~= "table" then
+    return nil, "navigation probe failed: "
+      .. tostring(response and response.status or "no_response") .. " / "
+      .. tostring(response and response.code or "unknown") .. ": "
+      .. tostring(response and response.message or "no response")
+  end
+  return response.payload
+end
+
+local function probeBlocked(payload, direction)
+  local value = payload[direction .. "_blocked"]
+  return value == true or value == "true"
+end
+
+local function probeKind(payload, direction)
+  local value = tostring(payload[direction .. "_kind"] or "unknown"):lower()
+  return probeKinds[value] and value or "unknown"
+end
+
+local function entityFailure(classification)
+  return classification and tostring(classification.message or ""):lower():find(
+    "entity", 1, true) ~= nil
+end
+
+local function retryEntity(context, snapshot, operation, classification, dependencies)
+  local current = classification
+  for attempt = 1, ENTITY_RETRIES do
+    if not entityFailure(current) then break end
+    write(dependencies, string.format(
+      "Entity obstructed %s; bounded retry %d/%d", operation, attempt, ENTITY_RETRIES))
+    if context.sleep then context.sleep(1) end
+    local result, reason, nextClassification = executeOperation(
+      context, snapshot, operation, dependencies)
+    if result then return true end
+    current = nextClassification
+    if not current then return nil, reason end
+  end
+  return nil, "entity remained in the route after bounded retries", current
+end
+
+local function safeProbeMove(context, snapshot, operation, direction, dependencies)
+  local probe, reason = probeResponse(context)
+  if not probe then return nil, reason end
+  local kind = probeKind(probe, direction)
+  if kind == "liquid" or kind == "solid" or kind == "entity" then
+    return nil, "refusing " .. operation .. " toward detected " .. kind
+  end
+  if kind == "unknown" then
+    return nil, "refusing " .. operation .. " with unknown adjacent terrain"
+  end
+  if probeBlocked(probe, direction) and kind ~= "replaceable" and kind ~= "passable" then
+    return nil, "refusing " .. operation .. " toward detected " .. kind
+  end
+  return executeOperation(context, snapshot, operation, dependencies)
+end
+
+local function detourCandidate(context, snapshot, turnOut, turnBack, dependencies)
+  local turned, reason = executeOperation(context, snapshot, turnOut, dependencies)
+  if not turned then return nil, reason, false end
+  local probe, probeReason = probeResponse(context)
+  if not probe then return nil, probeReason, false end
+  local sideKind = probeKind(probe, "front")
+  if sideKind == "liquid" or sideKind == "unknown" then
+    local restored, restoreReason = executeOperation(context, snapshot, turnBack, dependencies)
+    if not restored then return nil, restoreReason, false end
+    return nil, "lateral candidate contains " .. sideKind, true
+  end
+  local side, sideReason, sideClassification = executeOperation(
+    context, snapshot, "move_forward", dependencies)
+  if not side then
+    local restored, restoreReason = executeOperation(context, snapshot, turnBack, dependencies)
+    if not restored then return nil, restoreReason, false end
+    return nil, sideReason, true, sideClassification
+  end
+  local aligned, alignReason = executeOperation(context, snapshot, turnBack, dependencies)
+  if not aligned then return nil, alignReason, false end
+  local aheadProbe, aheadReason = probeResponse(context)
+  if not aheadProbe then return nil, aheadReason, false end
+  local aheadKind = probeKind(aheadProbe, "front")
+  if aheadKind == "liquid" or aheadKind == "unknown" then
+    return nil, "lateral candidate reaches " .. aheadKind, false
+  end
+  local around, aroundReason, aroundClassification = executeOperation(
+    context, snapshot, "move_forward", dependencies)
+  if not around then return nil, aroundReason, false, aroundClassification end
+  return true
+end
+
+local function handleHorizontalFailure(context, snapshot, operation,
+    classification, dependencies)
+  if entityFailure(classification) then
+    return retryEntity(context, snapshot, operation, classification, dependencies)
+  end
+
+  -- The probe sees only the front. Turn around after a failed backward move so
+  -- it examines the transition that actually failed; both turns remain normal
+  -- journaled breadcrumbs.
+  if operation == "move_backward" then
+    local turned, reason = executeOperations(context, snapshot,
+      {"turn_left", "turn_left"}, dependencies)
+    if not turned then return nil, reason end
+    operation = "move_forward"
+  end
+
+  local probe, probeReason = probeResponse(context)
+  if not probe then return nil, probeReason end
+  local frontKind = probeKind(probe, "front")
+  if frontKind == "entity" then
+    return retryEntity(context, snapshot, operation,
+      {message = "entity"}, dependencies)
+  end
+  if frontKind == "liquid" then return nil, "detected liquid in the route" end
+  if frontKind == "unknown" then return nil, "route classification is unknown" end
+
+  local upKind = probeKind(probe, "up")
+  if probeBlocked(probe, "front") and not probeBlocked(probe, "up")
+      and upKind ~= "liquid" and upKind ~= "unknown" then
+    write(dependencies, "Trying one-block climb over " .. frontKind)
+    local climbed, climbReason = executeOperation(
+      context, snapshot, "move_up", dependencies)
+    if not climbed then return nil, climbReason end
+    local across, acrossReason, acrossClassification = executeOperation(
+      context, snapshot, "move_forward", dependencies)
+    if across then return true end
+    if entityFailure(acrossClassification) then
+      return retryEntity(context, snapshot, "move_forward",
+        acrossClassification, dependencies)
+    end
+    write(dependencies, "One-block climb did not clear the obstruction; trying a lateral detour.")
+  end
+
+  write(dependencies, "Trying bounded left lateral detour.")
+  local detoured, detourReason, mayTryOther = detourCandidate(
+    context, snapshot, "turn_left", "turn_right", dependencies)
+  if detoured then return true end
+  if mayTryOther then
+    write(dependencies, "Left detour was blocked; trying bounded right lateral detour.")
+    local other, otherReason = detourCandidate(
+      context, snapshot, "turn_right", "turn_left", dependencies)
+    if other then return true end
+    return nil, "both lateral detours failed: " .. tostring(otherReason)
+  end
+  return nil, "lateral detour failed: " .. tostring(detourReason)
+end
+
 local function reachedDestination(snapshot)
   local value = snapshot.breadcrumbs[#snapshot.breadcrumbs]
   value = value and value.after or snapshot.home
@@ -457,11 +611,15 @@ local function completeReturn(context, snapshot, dependencies)
   while snapshot.return_state.cursor > 0 do
     local entry = snapshot.breadcrumbs[snapshot.return_state.cursor]
     local operation = assert(nav.inverse({entry.operation}))[1]
-    if not flatOperations[operation] then
-      return nil, "Stage 3 refuses a non-flat inverse return operation"
+    if not movementOperations[operation] then
+      return nil, "navigation refuses an incompatible inverse return operation"
     end
-    local result, operationReason = executeOperation(
+    local result, operationReason, classification = executeOperation(
       context, snapshot, operation, dependencies)
+    if not result and entityFailure(classification) then
+      result, operationReason = retryEntity(
+        context, snapshot, operation, classification, dependencies)
+    end
     if not result then return nil, operationReason end
   end
   local fresh, statusReason = statusResponse(context)
@@ -500,10 +658,9 @@ local function runStatus(context, dependencies)
   return payload and 0 or 1
 end
 
+local continueOutbound
+
 local function runGo(context, parsed, dependencies)
-  if parsed.destination.y ~= 0 then
-    return nil, "Stage 3 physical execution requires destination y=0", 2
-  end
   local existing, metadata = loadMission(context)
   if existing or not metadata or metadata.source ~= "new" then
     printMission(dependencies, existing, metadata)
@@ -513,8 +670,8 @@ local function runGo(context, parsed, dependencies)
   if not previewStatus then return nil, statusReason end
   local plan, planReason = planFrom(pose.new(), parsed.destination)
   if not plan then return nil, planReason, 2 end
-  local flat, flatReason = validFlatPlan(plan)
-  if not flat then return nil, flatReason end
+  local valid, validReason = validMovementPlan(plan)
+  if not valid then return nil, validReason end
   local preview, previewReason = context.navState.createMission(previewStatus, {
     mission_id = "preview-status", destination = parsed.destination,
     action_limit = ACTION_LIMIT, owner = "ocianav"
@@ -523,8 +680,10 @@ local function runGo(context, parsed, dependencies)
   if plan.cost + plan.inverse_cost > ACTION_LIMIT then
     return nil, "outbound and exact return exceed the physical-action limit"
   end
-  printPlan(dependencies, plan, "Supervised Stage 3 mission preview")
-  write(dependencies, "No sensing, obstacle avoidance, energy reserve, or charging proof is included.")
+  printRobotStatus(dependencies, previewStatus)
+  printPlan(dependencies, plan, "Supervised 3D navigation mission preview")
+  write(dependencies, "Reactive checks handle one-block climbs, bounded lateral detours, and temporary entities.")
+  write(dependencies, "No complete terrain survey, measured energy reserve, or charging proof is included.")
   if not confirmation(dependencies, "NAVIGATE") then
     write(dependencies, "Confirmation cancelled; no mission was created.")
     return true
@@ -537,7 +696,7 @@ local function runGo(context, parsed, dependencies)
   local snapshot, createReason = context.navState.createMission(confirmedStatus, {
     mission_id = context.missionId(), destination = parsed.destination,
     action_limit = ACTION_LIMIT, owner = "ocianav",
-    limits = {stage = 3, planned_outbound = plan.cost,
+    limits = {stage = "3d", planned_outbound = plan.cost,
       planned_return = plan.inverse_cost}
   })
   if not snapshot then return nil, createReason end
@@ -546,12 +705,9 @@ local function runGo(context, parsed, dependencies)
     .. tostring(persistReason) end
   local budgetOk, budgetReason = budgetOutbound(snapshot, plan)
   if not budgetOk then return nil, budgetReason end
-  local executed, executeReason = executeOperations(
-    context, snapshot, plan.operations, dependencies)
+  local executed, executeReason = continueOutbound(
+    context, snapshot, dependencies, plan)
   if not executed then return nil, executeReason end
-  local marked, markReason = context.navState.markDestination(context.store, snapshot)
-  if not marked then return nil, "destination persistence failed: " .. tostring(markReason) end
-  write(dependencies, "Destination reached and durably recorded. Charging is not verified.")
   return true
 end
 
@@ -575,7 +731,7 @@ local function runReturn(context, dependencies)
   local snapshot, previewStatus, assessment = preflightExisting(context, dependencies)
   if not snapshot then return nil, previewStatus end
   if snapshot.pending then return nil, "resume must resolve the pending exact request before return" end
-  local compatible, compatibilityReason = validateStage3Mission(snapshot)
+  local compatible, compatibilityReason = validateNavigationMission(snapshot)
   if not compatible then return nil, compatibilityReason end
   if snapshot.phase ~= "outbound" and snapshot.phase ~= "at_destination"
       and snapshot.phase ~= "recovery_required" then
@@ -585,14 +741,15 @@ local function runReturn(context, dependencies)
   for index = #snapshot.breadcrumbs, 1, -1 do
     operations[#operations + 1] = assert(nav.inverse({snapshot.breadcrumbs[index].operation}))[1]
   end
-  local flat, flatReason = validFlatPlan({operations = operations})
-  if not flat then return nil, flatReason end
+  local valid, validReason = validMovementPlan({operations = operations})
+  if not valid then return nil, validReason end
   local budgetOk, budgetReason = budgetInitialReturn(snapshot)
   if not budgetOk then return nil, budgetReason end
   write(dependencies, "Exact inverse return from " .. poseText(snapshot.pose))
   write(dependencies, string.format("Return actions remaining: %d; used/limit: %d/%d",
     #operations, snapshot.physical_actions, snapshot.limits.action_limit))
-  write(dependencies, "Return is unsensed and has no obstacle avoidance or charging proof.")
+  write(dependencies, "Return retries temporary entity obstruction but stops on a new solid obstacle.")
+  write(dependencies, "Return does not prove charging.")
   for index, operation in ipairs(operations) do
     write(dependencies, string.format("  %d. %s", index, operation))
   end
@@ -616,24 +773,56 @@ local function runReturn(context, dependencies)
   return completeReturn(context, snapshot, dependencies)
 end
 
-local function continueOutbound(context, snapshot, dependencies, preparedPlan)
-  if snapshot.pose.y ~= 0 or snapshot.destination.y ~= 0 then
-    return nil, "Stage 3 physical execution requires a flat mission at y=0"
-  end
+continueOutbound = function(context, snapshot, dependencies, preparedPlan)
   local plan = preparedPlan
-  if not plan then
-    local reason
-    plan, reason = planFrom(snapshot.pose, snapshot.destination,
-      tonumber(snapshot.limits.max_distance))
-    if not plan then return nil, reason end
+  local incidents = 0
+  while not reachedDestination(snapshot) do
+    if not plan then
+      local reason
+      plan, reason = planFrom(snapshot.pose, snapshot.destination,
+        tonumber(snapshot.limits.max_distance))
+      if not plan then return nil, reason end
+    end
+    local valid, validReason = validMovementPlan(plan)
+    if not valid then return nil, validReason end
+    local budgetOk, budgetReason = budgetOutbound(snapshot, plan)
+    if not budgetOk then return nil, budgetReason end
+    local operation = plan.operations[1]
+    if not operation then break end
+
+    local result, operationReason, classification
+    if operation == "move_down" then
+      result, operationReason, classification = safeProbeMove(
+        context, snapshot, operation, "down", dependencies)
+    else
+      result, operationReason, classification = executeOperation(
+        context, snapshot, operation, dependencies)
+    end
+    if not result then
+      if not classification or classification.kind ~= "completed_failure" then
+        return nil, operationReason
+      end
+      incidents = incidents + 1
+      if incidents > REACTIVE_INCIDENT_LIMIT then
+        return nil, "reactive terrain incident limit exceeded"
+      end
+      if horizontalOperations[operation] then
+        local recovered, recoveryReason = handleHorizontalFailure(
+          context, snapshot, operation, classification, dependencies)
+        if not recovered then return nil, recoveryReason end
+      elseif entityFailure(classification) then
+        local retried, retryReason = retryEntity(
+          context, snapshot, operation, classification, dependencies)
+        if not retried then return nil, retryReason end
+      else
+        return nil, operationReason
+      end
+    end
+    plan = nil -- Replan from the actual durable pose after every action or detour.
   end
-  local flat, flatReason = validFlatPlan(plan)
-  if not flat then return nil, flatReason end
-  local budgetOk, budgetReason = budgetOutbound(snapshot, plan)
-  if not budgetOk then return nil, budgetReason end
-  local executed, executeReason = executeOperations(
-    context, snapshot, plan.operations, dependencies)
-  if not executed then return nil, executeReason end
+  if not reachedDestination(snapshot) then
+    return nil, "navigation stopped without reaching the destination"
+  end
   local marked, markReason = context.navState.markDestination(context.store, snapshot)
   if not marked then return nil, markReason end
   write(dependencies, "Destination reached and durably recorded.")
@@ -660,8 +849,8 @@ local function outboundContinuationPlan(snapshot, startPose)
   local plan, reason = planFrom(startPose, snapshot.destination,
     tonumber(snapshot.limits.max_distance))
   if not plan then return nil, reason end
-  local flat, flatReason = validFlatPlan(plan)
-  if not flat then return nil, flatReason end
+  local valid, validReason = validMovementPlan(plan)
+  if not valid then return nil, validReason end
   return plan
 end
 
@@ -721,7 +910,7 @@ local function previewResume(snapshot, dependencies)
     write(dependencies, string.format(
       "Remaining outbound actions: %d; required through inverse return: %d/%d",
       plan.cost, required, snapshot.limits.action_limit))
-    write(dependencies, "Route assumes unobstructed terrain; no sensing or obstacle avoidance is included.")
+    write(dependencies, "Nominal route is unsurveyed; execution uses bounded reactive local checks.")
   elseif snapshot.phase == "returning" then
     local budgetOk, reason = budgetReturn(snapshot)
     if not budgetOk then return nil, reason end
@@ -751,7 +940,7 @@ end
 local function runResume(context, dependencies)
   local snapshot, previewStatus, assessment = preflightExisting(context, dependencies)
   if not snapshot then return nil, previewStatus end
-  local compatible, compatibilityReason = validateStage3Mission(snapshot)
+  local compatible, compatibilityReason = validateNavigationMission(snapshot)
   if not compatible then return nil, compatibilityReason end
   printMission(dependencies, snapshot, {source = JOURNAL_PATH})
   write(dependencies, "Resume action: " .. assessment.action)
@@ -825,11 +1014,6 @@ function cli.main(arguments, dependencies)
   local parsed, parseReason = cli.parse(arguments)
   if not parsed then writeError(dependencies, parseReason); usage(dependencies); return 2 end
   if parsed.command == "plan" then return runPlan(parsed, dependencies) end
-  if parsed.command == "go" and parsed.destination.y ~= 0 then
-    writeError(dependencies, "Stage 3 physical execution requires destination y=0")
-    return 2
-  end
-
   local context, contextReason = openContext(dependencies, "ocianav:" .. parsed.command)
   if not context then writeError(dependencies, tostring(contextReason)); return 1 end
   local values = table.pack(xpcall(function()

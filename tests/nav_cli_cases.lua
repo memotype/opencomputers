@@ -159,6 +159,19 @@ function cases.register(harness)
         return {certainty = "succeeded", status = "succeeded", code = "status",
           message = "fresh status returned", payload = payload}
       end
+      if operation == "nav_probe" then
+        local payload = {
+          front_blocked = false, front_kind = "air",
+          up_blocked = false, up_kind = "air",
+          down_blocked = false, down_kind = "air"
+        }
+        if options.probe then
+          local overrides = options.probe(value, payload) or {}
+          for key, item in pairs(overrides) do payload[key] = item end
+        end
+        return {certainty = "succeeded", status = "succeeded", code = "nav_probe",
+          message = "adjacent categories returned", payload = payload}
+      end
       local request = parsedRequest(operation, requestOptions)
       local cached = value.cache[request.request_id]
       if cached then return cached end
@@ -169,9 +182,11 @@ function cases.register(harness)
         return {certainty = "failed", status = "local_rejection",
           code = "invalid_request", message = "injected local rejection"}
       end
-      if options.fail and options.fail(operation, value) then
+      local failure = options.fail and options.fail(operation, value)
+      if failure then
         local payload = pose.toFields(value.pose)
-        payload.code, payload.message = "operation_failed", "solid"
+        payload.code = "operation_failed"
+        payload.message = type(failure) == "string" and failure or "solid"
         local failed = response(request, "failed", payload)
         value.cache[request.request_id] = failed
         return failed
@@ -200,6 +215,7 @@ function cases.register(harness)
     local closed = 0
     local context = {config = {robot_address = robotAddress}, navState = navState,
       store = store, missionId = function() return options.mission_id or "mission-stage3" end,
+      sleep = function() robot.sleep_calls = (robot.sleep_calls or 0) + 1 end,
       client = {sendRequest = function(_, operation, requestOptions)
         if operation ~= "status" then events[#events + 1] = "send:" .. operation end
         return robot.send(operation, requestOptions or {})
@@ -330,7 +346,147 @@ function cases.register(harness)
       "create,intent,send:turn_left,result,intent,send:move_forward,result,destination")
     equal(f.robot.pose.x, -1)
     equal(f.robot.pose.heading, "west")
+    contains(table.concat(f.output, "\n"), "Robot energy: 35000/35500")
     equal(f.closed(), 1)
+  end)
+
+  test("go supports nonzero Y and a probed one-block descent", function()
+    local up = fixture({reads = {"NAVIGATE"}})
+    equal(run(up, {"go", "--x", "0", "--y", "1", "--z", "0"}), 0)
+    local upSnapshot = assert(up.store.snapshot())
+    equal(upSnapshot.phase, "at_destination")
+    equal(upSnapshot.pose.y, 1)
+    equal(upSnapshot.breadcrumbs[1].operation, "move_up")
+
+    local down = fixture({reads = {"NAVIGATE"}})
+    equal(run(down, {"go", "--x", "0", "--y", "-1", "--z", "0"}), 0)
+    local downSnapshot = assert(down.store.snapshot())
+    equal(downSnapshot.pose.y, -1)
+    contains(table.concat(down.robot.calls, ","), "nav_probe,move_down")
+  end)
+
+  test("reactive traversal climbs one block and preserves consumed sequencing", function()
+    local f = fixture({reads = {"NAVIGATE"}, endpoint = {
+      fail = function(operation, robot)
+        return operation == "move_forward" and robot.pose.y == 0
+          and robot.pose.z == 0 and "solid"
+      end,
+      probe = function(robot)
+        if robot.pose.y == 0 and robot.pose.z == 0 then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = false, up_kind = "air"}
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "1", "--z", "-1"}), 0)
+    local snapshot = assert(f.store.snapshot())
+    equal(snapshot.high_water, 3)
+    equal(snapshot.physical_actions, 3)
+    equal(#snapshot.breadcrumbs, 2)
+    equal(snapshot.breadcrumbs[1].operation, "move_up")
+    equal(snapshot.breadcrumbs[2].operation, "move_forward")
+    equal(assert(protocol.parsePhysicalRequestId(
+      snapshot.breadcrumbs[1].request_id)).sequence, 2)
+    equal(assert(protocol.parsePhysicalRequestId(
+      snapshot.breadcrumbs[2].request_id)).sequence, 3)
+  end)
+
+  test("reactive traversal follows gradual one-block elevation changes", function()
+    local f = fixture({reads = {"NAVIGATE"}, endpoint = {
+      fail = function(operation, robot)
+        if operation == "move_forward" and robot.pose.y == -robot.pose.z
+            and robot.pose.y < 2 then return "solid" end
+      end,
+      probe = function(robot)
+        if robot.pose.y == -robot.pose.z and robot.pose.y < 2 then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = false, up_kind = "air"}
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "2", "--z", "-2"}), 0)
+    local snapshot = assert(f.store.snapshot())
+    equal(snapshot.pose.y, 2)
+    equal(snapshot.pose.z, -2)
+    equal(table.concat({snapshot.breadcrumbs[1].operation,
+      snapshot.breadcrumbs[2].operation, snapshot.breadcrumbs[3].operation,
+      snapshot.breadcrumbs[4].operation}, ","),
+      "move_up,move_forward,move_up,move_forward")
+  end)
+
+  test("reactive traversal takes a bounded lateral detour", function()
+    local f = fixture({reads = {"NAVIGATE", "RETURN"}, endpoint = {
+      fail = function(operation, robot)
+        return operation == "move_forward" and robot.pose.x == 0
+          and robot.pose.z == 0 and robot.pose.heading == "north" and "solid"
+      end,
+      probe = function(robot)
+        if robot.pose.x == 0 and robot.pose.z == 0
+            and robot.pose.heading == "north" then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = true, up_kind = "solid"}
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "0", "--z", "-2"}), 0,
+      table.concat(f.errors, "\n"))
+    local snapshot = assert(f.store.snapshot())
+    equal(snapshot.pose.x, 0)
+    equal(snapshot.pose.z, -2)
+    truthy(#snapshot.breadcrumbs > 2)
+    contains(table.concat(f.robot.calls, ","),
+      "turn_left,nav_probe,move_forward,turn_right,nav_probe,move_forward")
+    local outbound = {}
+    for index, entry in ipairs(snapshot.breadcrumbs) do outbound[index] = entry.operation end
+    equal(run(f, {"return"}), 0)
+    local expected = assert(require("ocia.nav").inverse(outbound))
+    local actual = {}
+    local completed = assert(f.store.live())
+    for index, entry in ipairs(completed.return_state.steps) do
+      actual[index] = entry.operation
+    end
+    equal(table.concat(actual, ","), table.concat(expected, ","))
+    equal(f.robot.pose.x, 0)
+    equal(f.robot.pose.z, 0)
+    equal(f.robot.pose.heading, "north")
+  end)
+
+  test("temporary entity obstruction uses bounded new-request retries", function()
+    local failures = 0
+    local f = fixture({reads = {"NAVIGATE"}, endpoint = {
+      fail = function(operation)
+        if operation == "move_forward" and failures < 2 then
+          failures = failures + 1
+          return "entity"
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "0", "--z", "-1"}), 0)
+    local snapshot = assert(f.store.snapshot())
+    equal(snapshot.high_water, 3)
+    equal(snapshot.physical_actions, 3)
+    equal(#snapshot.breadcrumbs, 1)
+    equal(assert(protocol.parsePhysicalRequestId(
+      snapshot.breadcrumbs[1].request_id)).sequence, 3)
+    equal(f.robot.sleep_calls, 2)
+  end)
+
+  test("reactive traversal stops when climb and both detours are blocked", function()
+    local f = fixture({reads = {"NAVIGATE"}, endpoint = {
+      fail = function(operation)
+        return operation == "move_forward" and "solid"
+      end,
+      probe = function()
+        return {front_blocked = true, front_kind = "solid",
+          up_blocked = true, up_kind = "solid"}
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "0", "--z", "-1"}), 1)
+    local snapshot = assert(f.store.snapshot())
+    equal(snapshot.phase, "outbound")
+    equal(snapshot.pending, nil)
+    equal(snapshot.reconciliation_required, false)
+    contains(table.concat(f.errors, "\n"), "both lateral detours failed")
   end)
 
   test("controller intent and result persistence faults stop progression", function()
@@ -370,7 +526,10 @@ function cases.register(harness)
 
   test("definite obstruction consumes sequence reconciles and stops", function()
     local f = fixture({reads = {"NAVIGATE"}, endpoint = {
-      fail = function(operation) return operation == "move_forward" end
+      fail = function(operation) return operation == "move_forward" end,
+      probe = function()
+        return {front_blocked = true, front_kind = "liquid"}
+      end
     }})
     equal(run(f, {"go", "--x", "0", "--y", "0", "--z", "-1"}), 1)
     local snapshot = assert(f.store.snapshot())
@@ -419,86 +578,33 @@ function cases.register(harness)
     equal(f.robot.executions, 2)
   end)
 
-  test("resume rejects pending vertical requests before retry authorization", function()
+  test("resume authorizes exact pending vertical requests", function()
     for _, operation in ipairs({"move_up", "move_down"}) do
       local f = fixture({reads = {"RESUME"}})
       local snapshot = createMissionFor(f, "mission-pending-" .. operation,
-        {x = 0, y = 0, z = 0})
+        {x = 0, y = operation == "move_up" and 1 or -1, z = 0})
       local pending = assert(navState.prepareIntent(f.store, snapshot, {
         operation = operation, recipient = robotAddress
       }))
-      truthy(navState.validate(snapshot))
-      equal(snapshot.pose.y, 0)
-      equal(snapshot.destination.y, 0)
-      equal(#snapshot.breadcrumbs, 0)
-      equal(#snapshot.return_state.steps, 0)
-      equal(snapshot.return_state.frozen, false)
-      equal(snapshot.return_state.cursor, 0)
-      equal(snapshot.journal.health, "healthy")
-      equal(snapshot.pending.before.y, 0)
-      equal(snapshot.pending.operation, operation)
-
-      local genericStatus = {mode = "ready", journal_health = "healthy",
-        epoch = epoch, high_water = 0, pose = pose.new()}
-      local genericAssessment = navState.assessStatus(snapshot, genericStatus)
-      equal(genericAssessment.ok, true)
-      equal(genericAssessment.action, "retry_identical")
-      equal(genericAssessment.request.request_id, pending.request_id)
-
-      local eventsBefore = #f.events
-      local callsBefore = #f.robot.calls
-      equal(run(f, {"resume"}), 1)
-      equal(f.robot.executions, 0)
-      equal(#f.robot.calls, callsBefore + 1)
-      equal(f.robot.calls[#f.robot.calls], "status")
-      equal(#f.events, eventsBefore)
-      contains(table.concat(f.errors, "\n"),
-        "cannot resume pending operation " .. operation)
-
+      equal(run(f, {"resume"}), 0)
       local durable = assert(f.store.snapshot())
-      equal(durable.high_water, 0)
-      equal(durable.physical_actions, 0)
-      equal(durable.pending.request_id, pending.request_id)
-      equal(durable.pending.sequence, pending.sequence)
-      equal(durable.pending.operation, operation)
-      equal(durable.pending.retry_authorized, false)
-      equal(durable.journal.health, "healthy")
-      for _, eventName in ipairs(f.events) do
-        truthy(eventName ~= "retry_authorized")
-        truthy(eventName:sub(1, 5) ~= "send:")
-      end
-
-      local eventsBeforeStatus = #f.events
-      equal(run(f, {"status"}), 0)
-      equal(#f.events, eventsBeforeStatus)
-      equal(f.robot.executions, 0)
-      contains(table.concat(f.output, "\n"), pending.request_id)
-      contains(table.concat(f.output, "\n"), operation)
-      local inspected = assert(f.store.snapshot())
-      equal(inspected.pending.request_id, pending.request_id)
-      equal(inspected.journal.health, "healthy")
+      equal(durable.pending, nil)
+      equal(durable.breadcrumbs[1].request_id, pending.request_id)
+      equal(durable.phase, "at_destination")
     end
   end)
 
-  test("resume rejects incompatible vertical history while status remains read-only", function()
+  test("resume completes frozen vertical return history", function()
     local f = fixture({reads = {"RESUME"}})
     local snapshot = createMissionFor(f, "mission-vertical-history",
       {x = 0, y = 0, z = 0})
     recordOperation(f, snapshot, "move_up")
     recordOperation(f, snapshot, "move_down")
     assert(navState.beginReturn(f.store, snapshot))
-    local eventsBefore = #f.events
-    local executionsBefore = f.robot.executions
-    equal(run(f, {"resume"}), 1)
-    equal(f.robot.executions, executionsBefore)
-    equal(#f.events, eventsBefore)
-    equal(snapshot.return_state.cursor, 2)
-
-    local statusCalls = #f.robot.calls
-    equal(run(f, {"status"}), 0)
-    equal(#f.events, eventsBefore)
-    equal(#f.robot.calls, statusCalls + 1)
-    equal(f.robot.calls[#f.robot.calls], "status")
+    equal(run(f, {"resume"}), 0)
+    equal(f.robot.pose.y, 0)
+    equal(assert(f.store.live()).return_state.cursor, 0)
+    truthy(f.store.archived())
   end)
 
   test("resume replans clean outbound suffix from reconciled durable pose", function()
@@ -601,7 +707,7 @@ function cases.register(harness)
     contains(atConfirmation.output, "Resume outbound continuation")
     contains(atConfirmation.output, "1. turn_left")
     contains(atConfirmation.output, "2. move_forward")
-    contains(atConfirmation.output, "unobstructed")
+    contains(atConfirmation.output, "bounded reactive local checks")
     contains(atConfirmation.output, "Physical actions already consumed: 0")
     equal(atConfirmation.events, eventsBefore)
     equal(atConfirmation.calls, 1)
@@ -763,13 +869,67 @@ function cases.register(harness)
     contains(calls, "turn_left,move_forward")
     contains(calls, "move_backward,turn_right")
     for _, operation in ipairs(f.robot.calls) do
-      truthy(operation == "status" or operation == "turn_left"
+      truthy(operation == "status" or operation == "nav_probe" or operation == "turn_left"
         or operation == "turn_right" or operation == "move_forward"
-        or operation == "move_backward", "unsupported Stage 3 operation " .. operation)
+        or operation == "move_backward" or operation == "move_up"
+        or operation == "move_down", "unsupported navigation operation " .. operation)
     end
   end)
 
-  test("return refuses a preexisting vertical breadcrumb without transmission", function()
+  test("return exactly inverts reactive vertical and detour breadcrumbs", function()
+    local f = fixture({reads = {"NAVIGATE", "RETURN"}, endpoint = {
+      fail = function(operation, robot)
+        return operation == "move_forward" and robot.pose.x == 0
+          and robot.pose.y == 0 and robot.pose.z == 0 and "solid"
+      end,
+      probe = function(robot)
+        if robot.pose.x == 0 and robot.pose.y == 0 and robot.pose.z == 0
+            and robot.pose.heading == "north" then
+          return {front_blocked = true, front_kind = "solid",
+            up_blocked = false, up_kind = "air"}
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "0", "--y", "1", "--z", "-1"}), 0)
+    local snapshot = assert(f.store.snapshot())
+    local outbound = {}
+    for index, entry in ipairs(snapshot.breadcrumbs) do outbound[index] = entry.operation end
+    equal(table.concat(outbound, ","), "move_up,move_forward")
+    equal(run(f, {"return"}), 0)
+    equal(f.robot.pose.x, 0)
+    equal(f.robot.pose.y, 0)
+    equal(f.robot.pose.z, 0)
+    equal(f.robot.pose.heading, "north")
+    local completed = assert(f.store.live())
+    equal(table.concat({completed.return_state.steps[1].operation,
+      completed.return_state.steps[2].operation}, ","),
+      table.concat(assert(require("ocia.nav").inverse(outbound)), ","))
+    truthy(f.store.archived())
+  end)
+
+  test("return retries a temporary entity with new journaled requests", function()
+    local blocked = 0
+    local f = fixture({reads = {"NAVIGATE", "RETURN"}, endpoint = {
+      fail = function(operation)
+        if operation == "move_backward" and blocked < 1 then
+          blocked = blocked + 1
+          return "entity"
+        end
+      end
+    }})
+    equal(run(f, {"go", "--x", "-1", "--y", "0", "--z", "0",
+      "--heading", "west"}), 0)
+    equal(run(f, {"return"}), 0)
+    local completed = assert(f.store.live())
+    equal(completed.high_water, 5)
+    equal(completed.physical_actions, 5)
+    equal(#completed.return_state.steps, 2)
+    equal(f.robot.sleep_calls, 1)
+    equal(f.robot.pose.x, 0)
+    equal(f.robot.pose.heading, "north")
+  end)
+
+  test("return inverts a vertical breadcrumb", function()
     local f = fixture({reads = {"RETURN"}})
     local snapshot = assert(navState.createMission({mode = "ready",
       journal_health = "healthy", epoch = epoch, high_water = 0,
@@ -787,11 +947,10 @@ function cases.register(harness)
     })
     assert(navState.recordResult(f.store, snapshot, response))
     assert(navState.markDestination(f.store, snapshot))
-    local executions = f.robot.executions
-    equal(run(f, {"return"}), 1)
-    equal(f.robot.executions, executions)
-    equal(snapshot.return_state.frozen, false)
-    contains(table.concat(f.errors, "\n"), "Stage 3")
+    equal(run(f, {"return"}), 0)
+    equal(f.robot.pose.y, 0)
+    equal(snapshot.return_state.cursor, 0)
+    truthy(f.store.archived())
   end)
 
   test("return revalidates status after confirmation before freezing breadcrumbs", function()
@@ -812,7 +971,10 @@ function cases.register(harness)
 
   test("partial outbound exact return archives an aborted mission", function()
     local f = fixture({reads = {"NAVIGATE", "RETURN"}, endpoint = {
-      fail = function(operation) return operation == "move_forward" end
+      fail = function(operation) return operation == "move_forward" end,
+      probe = function()
+        return {front_blocked = true, front_kind = "liquid"}
+      end
     }})
     equal(run(f, {"go", "--x", "-1", "--y", "0", "--z", "0",
       "--heading", "west"}), 1)

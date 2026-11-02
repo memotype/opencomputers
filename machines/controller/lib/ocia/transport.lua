@@ -23,7 +23,8 @@ end
 function transport:makeRequest(operation, options)
   options = options or {}
   local requestId = options.request_id
-  if not requestId and operation == "status" then
+  if not requestId and protocol.operations[operation]
+      and not protocol.operations[operation].physical then
     requestId = "s:" .. self.request_id()
   elseif not requestId then
     return nil, "physical operation requires an epoch/sequence request ID"

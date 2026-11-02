@@ -25,6 +25,9 @@ function executor.new(options)
   local self = setmetatable({
     store = options.store,
     perform = options.perform,
+    probe_provider = options.probe_provider or function()
+      return nil, "navigation probe is unavailable"
+    end,
     status_provider = options.status_provider or function() return {} end,
     recent_limit = options.recent_limit or 32,
     compact_records = options.compact_records or 128,
@@ -143,6 +146,16 @@ end
 function executor:handle(request)
   if request.operation == "status" then
     return result("succeeded", "status", "fresh status returned", self:statusPayload())
+  end
+  if request.operation == "nav_probe" then
+    local ok, fields, reason = pcall(self.probe_provider)
+    if not ok then
+      return result("failed", "probe_failed", tostring(fields))
+    end
+    if type(fields) ~= "table" then
+      return result("failed", "probe_failed", tostring(reason or fields))
+    end
+    return result("succeeded", "nav_probe", "adjacent categories returned", fields)
   end
 
   local identity, identityReason = protocol.parsePhysicalRequestId(request.request_id)
